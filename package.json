@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "db:setup": "bash scripts/setup-db.sh",
-    "db:migrate": "psql -d $DB_NAME -f migrations/001_initial_schema.sql && psql -d $DB_NAME -f migrations/002_cases_and_messages.sql && psql -d $DB_NAME -f migrations/003_prescriptions_and_labs.sql && psql -d $DB_NAME -f migrations/004_billing_and_payments.sql",
+    "db:migrate": "psql -d $DB_NAME -f migrations/001_initial_schema.sql && psql -d $DB_NAME -f migrations/002_cases_and_messages.sql && psql -d $DB_NAME -f migrations/003_prescriptions_and_labs.sql && psql -d $DB_NAME -f migrations/004_billing_and_payments.sql && psql -d $DB_NAME -f migrations/005_case_analysis_and_intake.sql && psql -d $DB_NAME -f migrations/006_agent_analysis_runs.sql && psql -d $DB_NAME -f migrations/007_agentic_shadow_results.sql",
     "db:seed": "psql -d $DB_NAME -f scripts/seed-data.sql",
     "db:reset": "npm run db:setup && npm run db:seed",
     "test": "jest",
@@ -40,6 +40,8 @@
     "twilio": "^4.19.0",
     "stripe": "^14.7.0",
     "socket.io": "^4.6.0",
+    "openai": "^4.104.0",
+    "pdf-parse": "^1.1.1",
     "date-fns": "^3.0.0",
     "uuid": "^9.0.1"
   },
@@ -75,4 +77,3 @@
     "npm": ">=9.0.0"
   }
 }
-

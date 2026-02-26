@@ -53,6 +53,15 @@ psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/003_prescript
 echo "  → Running 004_billing_and_payments.sql..."
 psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/004_billing_and_payments.sql
 
+echo "  → Running 005_case_analysis_and_intake.sql..."
+psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/005_case_analysis_and_intake.sql
+
+echo "  → Running 006_agent_analysis_runs.sql..."
+psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/006_agent_analysis_runs.sql
+
+echo "  → Running 007_agentic_shadow_results.sql..."
+psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/007_agentic_shadow_results.sql
+
 echo "✅ All migrations completed successfully"
 
 # Create uploads directory
@@ -63,4 +72,3 @@ echo "✅ Uploads directory created"
 echo ""
 echo "🎉 Database setup complete!"
 echo "You can now run: npm run dev"
-

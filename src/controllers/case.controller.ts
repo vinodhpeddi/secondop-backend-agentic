@@ -2,32 +2,396 @@ import { Response, NextFunction } from 'express';
 import { query, transaction } from '../database/connection';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth';
+import { extractObservationsFromSummary } from '../services/analysis.service';
+import { getLatestAnalysisRun, getLatestAnalysisRunByEngine, getLatestShadowResultByCaseId } from '../services/analysisRun.service';
+import { getCaseRunTrace } from '../agentic/observability/analysisObservability.service';
+import { analysisWorker } from '../services/analysisWorker.service';
+
+interface IntakePayload {
+  age: number;
+  sex: string;
+  specialtyContext: string;
+  symptoms: string;
+  symptomDuration: string;
+  medicalHistory: string;
+  currentMedications: string;
+  allergies: string;
+}
+
+const assertNonEmptyString = (value: unknown, fieldName: string): string => {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new AppError(`${fieldName} is required`, 400);
+  }
+
+  return value.trim();
+};
+
+const parseIntake = (input: unknown): IntakePayload => {
+  if (!input || typeof input !== 'object') {
+    throw new AppError('intake is required', 400);
+  }
+
+  const ageValue = (input as { age?: unknown }).age;
+  const age = Number(ageValue);
+
+  if (!Number.isFinite(age) || age < 0 || age > 130) {
+    throw new AppError('intake.age must be between 0 and 130', 400);
+  }
+
+  return {
+    age,
+    sex: assertNonEmptyString((input as { sex?: unknown }).sex, 'intake.sex'),
+    specialtyContext: assertNonEmptyString(
+      (input as { specialtyContext?: unknown }).specialtyContext,
+      'intake.specialtyContext'
+    ),
+    symptoms: assertNonEmptyString((input as { symptoms?: unknown }).symptoms, 'intake.symptoms'),
+    symptomDuration: assertNonEmptyString(
+      (input as { symptomDuration?: unknown }).symptomDuration,
+      'intake.symptomDuration'
+    ),
+    medicalHistory: assertNonEmptyString(
+      (input as { medicalHistory?: unknown }).medicalHistory,
+      'intake.medicalHistory'
+    ),
+    currentMedications: assertNonEmptyString(
+      (input as { currentMedications?: unknown }).currentMedications,
+      'intake.currentMedications'
+    ),
+    allergies: assertNonEmptyString((input as { allergies?: unknown }).allergies, 'intake.allergies'),
+  };
+};
+
+const getPatientIdForUser = async (userId: string): Promise<string> => {
+  const patientResult = await query('SELECT id FROM patients WHERE user_id = $1', [userId]);
+
+  if (patientResult.rows.length === 0) {
+    throw new AppError('Patient profile not found', 404);
+  }
+
+  return patientResult.rows[0].id as string;
+};
+
+const ensurePatientOwnsCase = async (caseId: string, userId: string): Promise<void> => {
+  const result = await query(
+    `SELECT c.id
+     FROM cases c
+     JOIN patients p ON p.id = c.patient_id
+     WHERE c.id = $1 AND p.user_id = $2`,
+    [caseId, userId]
+  );
+
+  if (result.rows.length === 0) {
+    throw new AppError('You do not have access to this case', 403);
+  }
+};
+
+const ensureDoctorAssignedToCase = async (caseId: string, userId: string): Promise<void> => {
+  const result = await query(
+    `SELECT c.id
+     FROM cases c
+     JOIN case_assignments ca ON ca.case_id = c.id
+     JOIN doctors d ON d.id = ca.doctor_id
+     WHERE c.id = $1 AND d.user_id = $2`,
+    [caseId, userId]
+  );
+
+  if (result.rows.length === 0) {
+    throw new AppError('You do not have access to this case', 403);
+  }
+};
+
+const ensureCaseAccess = async (
+  caseId: string,
+  userId: string,
+  userType: 'patient' | 'doctor'
+): Promise<void> => {
+  if (userType === 'patient') {
+    await ensurePatientOwnsCase(caseId, userId);
+    return;
+  }
+
+  await ensureDoctorAssignedToCase(caseId, userId);
+};
+
+const parseSpecialistQuestions = (input: unknown): string[] => {
+  if (!Array.isArray(input) || input.length !== 3) {
+    throw new AppError('specialistQuestions must contain exactly 3 items', 400);
+  }
+
+  return input.map((value, index) => {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new AppError(`specialistQuestions[${index}] must be a non-empty string`, 400);
+    }
+
+    return value.trim();
+  });
+};
 
 export const createCase = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const { title, description, specialty, priority, urgencyLevel } = req.body;
     const userId = req.user!.id;
+    const patientId = await getPatientIdForUser(userId);
 
-    // Get patient ID
-    const patientResult = await query('SELECT id FROM patients WHERE user_id = $1', [userId]);
-    if (patientResult.rows.length === 0) {
-      throw new AppError('Patient profile not found', 404);
-    }
-    const patientId = patientResult.rows[0].id;
+    const title = assertNonEmptyString(req.body.title, 'title');
+    const description = typeof req.body.description === 'string' ? req.body.description : '';
+    const specialty = assertNonEmptyString(req.body.specialty, 'specialty');
+    const priority = typeof req.body.priority === 'string' ? req.body.priority : 'medium';
+    const urgencyLevel = typeof req.body.urgencyLevel === 'string' ? req.body.urgencyLevel : 'moderate';
+    const status = req.body.status === 'draft' ? 'draft' : 'pending';
+    const intake = parseIntake(req.body.intake);
 
-    // Generate case number
-    const caseNumber = `SO${Date.now()}`;
+    const caseNumber = `SO${Date.now()}${Math.floor(Math.random() * 1000)}`;
 
-    const result = await query(
-      `INSERT INTO cases (case_number, patient_id, title, description, specialty, priority, urgency_level, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
-       RETURNING *`,
-      [caseNumber, patientId, title, description, specialty, priority || 'medium', urgencyLevel || 'moderate']
-    );
+    const created = await transaction(async (client) => {
+      const caseInsert = await client.query(
+        `INSERT INTO cases (case_number, patient_id, title, description, specialty, priority, urgency_level, status, analysis_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'not_started')
+         RETURNING *`,
+        [caseNumber, patientId, title, description, specialty, priority, urgencyLevel, status]
+      );
+
+      const caseRow = caseInsert.rows[0];
+
+      await client.query(
+        `INSERT INTO case_intake (case_id, age_at_submission, sex, specialty_context, symptoms, symptom_duration, medical_history, current_medications, allergies)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          caseRow.id,
+          intake.age,
+          intake.sex,
+          intake.specialtyContext,
+          intake.symptoms,
+          intake.symptomDuration,
+          intake.medicalHistory,
+          intake.currentMedications,
+          intake.allergies,
+        ]
+      );
+
+      return caseRow;
+    });
 
     res.status(201).json({
       status: 'success',
-      data: result.rows[0],
+      data: created,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const updateCaseIntake = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const { caseId } = req.params;
+    const userId = req.user!.id;
+
+    await ensurePatientOwnsCase(caseId, userId);
+    const intake = parseIntake(req.body.intake);
+
+    await query(
+      `INSERT INTO case_intake (case_id, age_at_submission, sex, specialty_context, symptoms, symptom_duration, medical_history, current_medications, allergies)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (case_id)
+       DO UPDATE SET
+         age_at_submission = EXCLUDED.age_at_submission,
+         sex = EXCLUDED.sex,
+         specialty_context = EXCLUDED.specialty_context,
+         symptoms = EXCLUDED.symptoms,
+         symptom_duration = EXCLUDED.symptom_duration,
+         medical_history = EXCLUDED.medical_history,
+         current_medications = EXCLUDED.current_medications,
+         allergies = EXCLUDED.allergies,
+         updated_at = CURRENT_TIMESTAMP`,
+      [
+        caseId,
+        intake.age,
+        intake.sex,
+        intake.specialtyContext,
+        intake.symptoms,
+        intake.symptomDuration,
+        intake.medicalHistory,
+        intake.currentMedications,
+        intake.allergies,
+      ]
+    );
+
+    if (typeof req.body.specialty === 'string' && req.body.specialty.trim()) {
+      await query(
+        `UPDATE cases
+         SET specialty = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [req.body.specialty.trim(), caseId]
+      );
+    }
+
+    res.json({
+      status: 'success',
+      message: 'Case intake updated successfully',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const queueCaseAnalysis = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const { caseId } = req.params;
+    const userId = req.user!.id;
+
+    await ensurePatientOwnsCase(caseId, userId);
+
+    const intakeResult = await query('SELECT case_id FROM case_intake WHERE case_id = $1', [caseId]);
+    if (intakeResult.rows.length === 0) {
+      throw new AppError('Case intake is required before analysis', 400);
+    }
+
+    const filesResult = await query(
+      `SELECT COUNT(*)::int as file_count
+       FROM medical_files
+       WHERE case_id = $1
+         AND (file_type = 'application/pdf' OR LOWER(file_name) LIKE '%.pdf')`,
+      [caseId]
+    );
+
+    const fileCount = filesResult.rows[0].file_count as number;
+    if (fileCount < 1) {
+      throw new AppError('At least one PDF file is required before analysis', 400);
+    }
+
+    const queued = await analysisWorker.queueCase(caseId);
+
+    res.json({
+      status: 'success',
+      data: {
+        caseId,
+        analysisStatus: queued.analysisStatus,
+        analysisRunId: queued.analysisRunId,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getCaseAnalysis = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const { caseId } = req.params;
+    const userId = req.user!.id;
+    const userType = req.user!.type;
+    const includeAgentic = String(req.query.includeAgentic || "").toLowerCase() === "true";
+
+    await ensureCaseAccess(caseId, userId, userType);
+
+    const result = await query(
+      `SELECT analysis_status, analysis_summary, analysis_questions, analysis_error
+       FROM cases
+       WHERE id = $1`,
+      [caseId]
+    );
+
+    if (result.rows.length === 0) {
+      throw new AppError("Case not found", 404);
+    }
+
+    const row = result.rows[0] as {
+      analysis_status: string;
+      analysis_summary: string | null;
+      analysis_questions: string[] | null;
+      analysis_error: string | null;
+    };
+
+    const latestRun = await getLatestAnalysisRun(caseId);
+    const observations =
+      typeof row.analysis_summary === "string" && row.analysis_summary.trim()
+        ? extractObservationsFromSummary(row.analysis_summary)
+        : null;
+
+    const payload: Record<string, unknown> = {
+      analysisStatus: row.analysis_status,
+      summary: row.analysis_summary,
+      analysisQuestions: row.analysis_questions,
+      error: row.analysis_error,
+      analysisRunId: latestRun?.id || null,
+      observations,
+    };
+
+    if (includeAgentic) {
+      const latestAgenticRun = await getLatestAnalysisRunByEngine(caseId, "agentic");
+      const latestShadow = await getLatestShadowResultByCaseId(caseId);
+
+      payload.agenticRunId = latestAgenticRun?.id || null;
+      payload.agenticShadowStatus = latestAgenticRun?.status || "not_run";
+      payload.agenticCriticScore = latestShadow?.critic_score_json || null;
+      payload.agenticMode = latestAgenticRun?.execution_mode || null;
+    }
+
+    res.json({
+      status: "success",
+      data: payload,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getCaseAnalysisTrace = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const { caseId } = req.params;
+    const userId = req.user!.id;
+    const userType = req.user!.type;
+    const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
+
+    await ensureCaseAccess(caseId, userId, userType);
+
+    const trace = await getCaseRunTrace(caseId, runId);
+
+    res.json({
+      status: "success",
+      data: trace,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const submitCase = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const { caseId } = req.params;
+    const userId = req.user!.id;
+
+    await ensurePatientOwnsCase(caseId, userId);
+
+    const specialistQuestions = parseSpecialistQuestions(req.body.specialistQuestions);
+
+    const caseResult = await query(
+      `SELECT analysis_status
+       FROM cases
+       WHERE id = $1`,
+      [caseId]
+    );
+
+    if (caseResult.rows.length === 0) {
+      throw new AppError('Case not found', 404);
+    }
+
+    if (caseResult.rows[0].analysis_status !== 'succeeded') {
+      throw new AppError('Case analysis must succeed before submission', 400);
+    }
+
+    await query(
+      `UPDATE cases
+       SET specialist_questions = $2,
+           status = 'pending',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [caseId, JSON.stringify(specialistQuestions)]
+    );
+
+    res.json({
+      status: 'success',
+      message: 'Case submitted successfully',
     });
   } catch (error) {
     next(error);
@@ -37,11 +401,14 @@ export const createCase = async (req: AuthRequest, res: Response, next: NextFunc
 export const getCases = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.id;
-    const patientResult = await query('SELECT id FROM patients WHERE user_id = $1', [userId]);
-    const patientId = patientResult.rows[0].id;
+    const patientId = await getPatientIdForUser(userId);
 
     const result = await query(
-      'SELECT * FROM cases WHERE patient_id = $1 ORDER BY submitted_date DESC',
+      `SELECT c.*, ci.age_at_submission, ci.sex, ci.specialty_context
+       FROM cases c
+       LEFT JOIN case_intake ci ON ci.case_id = c.id
+       WHERE c.patient_id = $1
+       ORDER BY c.submitted_date DESC`,
       [patientId]
     );
 
@@ -57,15 +424,39 @@ export const getCases = async (req: AuthRequest, res: Response, next: NextFuncti
 export const getCaseById = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const { caseId } = req.params;
-    const result = await query('SELECT * FROM cases WHERE id = $1', [caseId]);
+    const userId = req.user!.id;
+    const userType = req.user!.type;
 
-    if (result.rows.length === 0) {
+    await ensureCaseAccess(caseId, userId, userType);
+
+    const caseResult = await query('SELECT * FROM cases WHERE id = $1', [caseId]);
+
+    if (caseResult.rows.length === 0) {
       throw new AppError('Case not found', 404);
     }
 
+    const intakeResult = await query(
+      `SELECT age_at_submission, sex, specialty_context, symptoms, symptom_duration, medical_history, current_medications, allergies
+       FROM case_intake
+       WHERE case_id = $1`,
+      [caseId]
+    );
+
+    const filesResult = await query(
+      `SELECT id, file_name, file_type, file_size, file_url, file_category, description, created_at
+       FROM medical_files
+       WHERE case_id = $1
+       ORDER BY created_at DESC`,
+      [caseId]
+    );
+
     res.json({
       status: 'success',
-      data: result.rows[0],
+      data: {
+        ...caseResult.rows[0],
+        intake: intakeResult.rows[0] || null,
+        files: filesResult.rows,
+      },
     });
   } catch (error) {
     next(error);
@@ -75,15 +466,20 @@ export const getCaseById = async (req: AuthRequest, res: Response, next: NextFun
 export const updateCase = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const { caseId } = req.params;
-    const updates = req.body;
+    const userId = req.user!.id;
+
+    await ensurePatientOwnsCase(caseId, userId);
+
+    const title = typeof req.body.title === 'string' ? req.body.title.trim() : null;
+    const description = typeof req.body.description === 'string' ? req.body.description : null;
 
     await query(
-      `UPDATE cases SET 
-       title = COALESCE($1, title),
-       description = COALESCE($2, description),
-       updated_at = CURRENT_TIMESTAMP
+      `UPDATE cases
+       SET title = COALESCE($1, title),
+           description = COALESCE($2, description),
+           updated_at = CURRENT_TIMESTAMP
        WHERE id = $3`,
-      [updates.title, updates.description, caseId]
+      [title, description, caseId]
     );
 
     res.json({
@@ -98,6 +494,9 @@ export const updateCase = async (req: AuthRequest, res: Response, next: NextFunc
 export const deleteCase = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const { caseId } = req.params;
+    const userId = req.user!.id;
+
+    await ensurePatientOwnsCase(caseId, userId);
     await query('DELETE FROM cases WHERE id = $1', [caseId]);
 
     res.json({
@@ -113,10 +512,19 @@ export const assignDoctorToCase = async (req: AuthRequest, res: Response, next: 
   try {
     const { caseId } = req.params;
     const { doctorId } = req.body;
+    const userId = req.user!.id;
+
+    if (!doctorId || typeof doctorId !== 'string') {
+      throw new AppError('doctorId is required', 400);
+    }
+
+    await ensurePatientOwnsCase(caseId, userId);
 
     await query(
       `INSERT INTO case_assignments (case_id, doctor_id, status)
-       VALUES ($1, $2, 'assigned')`,
+       VALUES ($1, $2, 'assigned')
+       ON CONFLICT (case_id, doctor_id)
+       DO NOTHING`,
       [caseId, doctorId]
     );
 
@@ -132,13 +540,30 @@ export const assignDoctorToCase = async (req: AuthRequest, res: Response, next: 
 export const getDoctorCases = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.id;
+
     const doctorResult = await query('SELECT id FROM doctors WHERE user_id = $1', [userId]);
-    const doctorId = doctorResult.rows[0].id;
+    if (doctorResult.rows.length === 0) {
+      throw new AppError('Doctor profile not found', 404);
+    }
+
+    const doctorId = doctorResult.rows[0].id as string;
 
     const result = await query(
-      `SELECT c.*, ca.status as assignment_status, ca.assigned_date
+      `SELECT c.*, ca.status as assignment_status, ca.assigned_date,
+              ci.age_at_submission,
+              ci.sex,
+              ci.specialty_context,
+              ci.symptoms,
+              ci.symptom_duration,
+              ci.medical_history,
+              ci.current_medications,
+              ci.allergies,
+              p.first_name as patient_first_name,
+              p.last_name as patient_last_name
        FROM cases c
        JOIN case_assignments ca ON c.id = ca.case_id
+       JOIN patients p ON p.id = c.patient_id
+       LEFT JOIN case_intake ci ON ci.case_id = c.id
        WHERE ca.doctor_id = $1
        ORDER BY ca.assigned_date DESC`,
       [doctorId]
@@ -157,10 +582,20 @@ export const updateCaseStatus = async (req: AuthRequest, res: Response, next: Ne
   try {
     const { caseId } = req.params;
     const { status } = req.body;
+    const userId = req.user!.id;
+
+    if (typeof status !== 'string' || !status.trim()) {
+      throw new AppError('status is required', 400);
+    }
+
+    await ensureDoctorAssignedToCase(caseId, userId);
 
     await query(
-      'UPDATE cases SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-      [status, caseId]
+      `UPDATE cases
+       SET status = $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [status.trim(), caseId]
     );
 
     res.json({
@@ -171,4 +606,3 @@ export const updateCaseStatus = async (req: AuthRequest, res: Response, next: Ne
     next(error);
   }
 };
-

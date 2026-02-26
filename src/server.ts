@@ -13,6 +13,7 @@ import { notFoundHandler } from './middleware/notFoundHandler';
 import { rateLimiter } from './middleware/rateLimiter';
 import logger from './utils/logger';
 import { initializeDatabase } from './database/connection';
+import { analysisWorker } from './services/analysisWorker.service';
 
 // Import routes
 import authRoutes from './routes/auth.routes';
@@ -57,7 +58,7 @@ app.use(morgan('combined', { stream: { write: (message) => logger.info(message.t
 app.use('/api', rateLimiter);
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -109,6 +110,7 @@ const startServer = async () => {
     // Initialize database connection
     await initializeDatabase();
     logger.info('Database connected successfully');
+    await analysisWorker.recoverInterruptedJobs();
 
     httpServer.listen(PORT, () => {
       logger.info(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
@@ -132,4 +134,3 @@ process.on('SIGTERM', () => {
 });
 
 export { app, io };
-

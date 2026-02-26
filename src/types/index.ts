@@ -75,6 +75,42 @@ export interface Case {
   completed_date?: Date;
   created_at: Date;
   updated_at: Date;
+  analysis_status: 'not_started' | 'queued' | 'processing' | 'succeeded' | 'failed';
+  analysis_summary?: string;
+  analysis_questions?: string[];
+  specialist_questions?: string[];
+  analysis_model?: string;
+  analysis_error?: string;
+  analysis_started_at?: Date;
+  analysis_completed_at?: Date;
+}
+
+export interface CaseIntake {
+  id: string;
+  case_id: string;
+  age_at_submission: number;
+  sex: string;
+  specialty_context: string;
+  symptoms: string;
+  symptom_duration: string;
+  medical_history: string;
+  current_medications: string;
+  allergies: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CaseAnalysisResult {
+  analysisStatus: 'not_started' | 'queued' | 'processing' | 'succeeded' | 'failed';
+  summary?: string;
+  analysisQuestions?: string[];
+  error?: string;
+  analysisRunId?: string | null;
+  observations?: string[] | null;
+  agenticRunId?: string | null;
+  agenticShadowStatus?: 'not_run' | 'queued' | 'processing' | 'succeeded' | 'failed';
+  agenticCriticScore?: unknown;
+  agenticMode?: 'off' | 'shadow' | 'direct' | null;
 }
 
 export interface Message {
@@ -168,4 +204,3 @@ export interface LabResult {
   created_at: Date;
   updated_at: Date;
 }
-

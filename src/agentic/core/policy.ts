@@ -1,0 +1,43 @@
+import { AgenticAction, AgenticError, AgenticMode, AgenticPolicy } from './types';
+
+const validModes: AgenticMode[] = ['off', 'shadow', 'direct'];
+
+export const resolveAgenticMode = (): AgenticMode => {
+  const raw = (process.env.ANALYSIS_AGENTIC_MODE || 'off').toLowerCase();
+  if (validModes.includes(raw as AgenticMode)) {
+    return raw as AgenticMode;
+  }
+
+  return 'off';
+};
+
+export const buildAgenticPolicy = (): AgenticPolicy => {
+  const maxSteps = Math.max(1, parseInt(process.env.AGENTIC_MAX_STEPS || '8', 10));
+  const maxRefinements = Math.max(0, parseInt(process.env.AGENTIC_MAX_REFINEMENTS || '1', 10));
+
+  return {
+    allowedActions: ['VALIDATE_INTAKE', 'EXTRACT_REPORTS', 'SYNTHESIZE_SUMMARY', 'GUARD_QUESTIONS', 'FINALIZE'],
+    maxSteps,
+    maxRefinements,
+  };
+};
+
+export const assertActionAllowed = (policy: AgenticPolicy, action: string): AgenticAction => {
+  if (!policy.allowedActions.includes(action as AgenticAction)) {
+    throw new AgenticError('policy_error', `Planner selected disallowed action: ${action}`);
+  }
+
+  return action as AgenticAction;
+};
+
+export const assertStepBudget = (policy: AgenticPolicy, stepCount: number): void => {
+  if (stepCount > policy.maxSteps) {
+    throw new AgenticError('timeout_error', `Agentic loop exceeded step budget (${policy.maxSteps}).`);
+  }
+};
+
+export const assertRefinementBudget = (policy: AgenticPolicy, refinementCount: number): void => {
+  if (refinementCount > policy.maxRefinements) {
+    throw new AgenticError('policy_error', `Agentic loop exceeded refinement budget (${policy.maxRefinements}).`);
+  }
+};
