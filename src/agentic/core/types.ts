@@ -24,6 +24,12 @@ export interface AgenticPolicy {
   maxRefinements: number;
 }
 
+export interface AgenticTokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface AgenticCriticScore {
   passed: boolean;
   needsRefinement: boolean;
@@ -62,6 +68,7 @@ export interface AgenticLoopState {
 export interface AgenticPlannerDecision {
   action: AgenticAction;
   rationale: string;
+  usage?: AgenticTokenUsage;
 }
 
 export interface AgenticActionHistoryItem {
@@ -69,6 +76,7 @@ export interface AgenticActionHistoryItem {
   action: AgenticAction;
   rationale: string;
   timestamp: string;
+  usage?: AgenticTokenUsage;
 }
 
 export interface AgenticRuntimeContext {

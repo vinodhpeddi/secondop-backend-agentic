@@ -55,6 +55,7 @@ const buildMetadata = (stepName: string, state: CaseAnalysisPipelineState): Reco
             summaryLength: state.analysis.summary.length,
             questionCount: state.analysis.topQuestions.length,
             observationCount: state.observations?.length || 0,
+            modelTokenUsage: state.analysis.usage || null,
           }
         : null;
     case 'question-guard':

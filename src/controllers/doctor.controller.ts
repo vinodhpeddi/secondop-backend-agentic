@@ -99,10 +99,8 @@ export const searchDoctors = async (req: AuthRequest, res: Response, next: NextF
   }
 };
 
-export const getDoctorReviews = async (req: AuthRequest, res: Response, next: NextFunction) => {
+export const getDoctorReviews = async (_req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const { doctorId } = req.params;
-
     // This would require a reviews table - for now, return empty array
     // In production, you'd have a doctor_reviews table
     res.json({
@@ -117,9 +115,9 @@ export const getDoctorReviews = async (req: AuthRequest, res: Response, next: Ne
 
 export const addDoctorReview = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const { doctorId } = req.params;
-    const { rating, comment } = req.body;
-    const userId = req.user!.id;
+    void req.params;
+    void req.body;
+    void req.user;
 
     // This would require a reviews table
     // For now, just return success
@@ -131,4 +129,3 @@ export const addDoctorReview = async (req: AuthRequest, res: Response, next: Nex
     next(error);
   }
 };
-

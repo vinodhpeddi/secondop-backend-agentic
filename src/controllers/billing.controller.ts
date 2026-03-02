@@ -5,10 +5,10 @@ import { AuthRequest } from '../middleware/auth';
 import Stripe from 'stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
-  apiVersion: '2024-11-20.acacia',
+  apiVersion: '2023-10-16',
 });
 
-export const getSubscriptionPlans = async (req: AuthRequest, res: Response, next: NextFunction) => {
+export const getSubscriptionPlans = async (_req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const result = await query('SELECT * FROM subscription_plans WHERE is_active = true ORDER BY price ASC');
 
@@ -213,7 +213,7 @@ export const handleWebhook = async (req: AuthRequest, res: Response, next: NextF
       case 'payment_intent.succeeded':
         // Handle successful payment
         break;
-      case 'subscription.updated':
+      case 'customer.subscription.updated':
         // Handle subscription update
         break;
       default:
@@ -225,4 +225,3 @@ export const handleWebhook = async (req: AuthRequest, res: Response, next: NextF
     next(error);
   }
 };
-

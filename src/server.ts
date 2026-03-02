@@ -14,6 +14,7 @@ import { rateLimiter } from './middleware/rateLimiter';
 import logger from './utils/logger';
 import { initializeDatabase } from './database/connection';
 import { analysisWorker } from './services/analysisWorker.service';
+import { initializePhoenixObservability } from './observability/phoenix.service';
 
 // Import routes
 import authRoutes from './routes/auth.routes';
@@ -30,6 +31,7 @@ import doctorRoutes from './routes/doctor.routes';
 
 // Load environment variables
 dotenv.config();
+initializePhoenixObservability();
 
 const app: Application = express();
 const httpServer = createServer(app);

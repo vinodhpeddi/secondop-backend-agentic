@@ -1,5 +1,93 @@
 import { query } from '../../database/connection';
 
+interface TokenUsageAggregate {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+interface RunTokenUsageSummary {
+  modelTokenUsage: TokenUsageAggregate;
+  plannerTokenUsage: TokenUsageAggregate;
+  totalTokenUsage: TokenUsageAggregate;
+}
+
+const createTokenUsage = (): TokenUsageAggregate => ({
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+});
+
+const coerceMetadata = (raw: unknown): Record<string, unknown> => {
+  if (!raw) {
+    return {};
+  }
+
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === 'object') {
+        return parsed as Record<string, unknown>;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+
+  if (typeof raw === 'object') {
+    return raw as Record<string, unknown>;
+  }
+
+  return {};
+};
+
+const addUsage = (target: TokenUsageAggregate, usage: unknown): void => {
+  const safe = (usage || {}) as {
+    promptTokens?: unknown;
+    completionTokens?: unknown;
+    totalTokens?: unknown;
+  };
+
+  target.promptTokens += Number(safe.promptTokens || 0);
+  target.completionTokens += Number(safe.completionTokens || 0);
+  target.totalTokens += Number(safe.totalTokens || 0);
+};
+
+const aggregateEventTokenUsage = (
+  rows: Array<{ run_id?: string; metadata_json?: unknown }>
+): Record<string, RunTokenUsageSummary> => {
+  const byRunId: Record<string, RunTokenUsageSummary> = {};
+
+  for (const row of rows) {
+    const runId = row.run_id;
+    if (!runId) {
+      continue;
+    }
+
+    if (!byRunId[runId]) {
+      byRunId[runId] = {
+        modelTokenUsage: createTokenUsage(),
+        plannerTokenUsage: createTokenUsage(),
+        totalTokenUsage: createTokenUsage(),
+      };
+    }
+
+    const metadata = coerceMetadata(row.metadata_json);
+    addUsage(byRunId[runId].modelTokenUsage, metadata.modelTokenUsage);
+    addUsage(byRunId[runId].plannerTokenUsage, metadata.plannerTokenUsage);
+
+    byRunId[runId].totalTokenUsage.promptTokens =
+      byRunId[runId].modelTokenUsage.promptTokens + byRunId[runId].plannerTokenUsage.promptTokens;
+    byRunId[runId].totalTokenUsage.completionTokens =
+      byRunId[runId].modelTokenUsage.completionTokens + byRunId[runId].plannerTokenUsage.completionTokens;
+    byRunId[runId].totalTokenUsage.totalTokens =
+      byRunId[runId].modelTokenUsage.totalTokens + byRunId[runId].plannerTokenUsage.totalTokens;
+  }
+
+  return byRunId;
+};
+
 export const getCaseRunTrace = async (caseId: string, runId?: string) => {
   const runsResult = await query(
     `SELECT id, case_id, status, engine, execution_mode, started_at, completed_at, model, error, created_at
@@ -33,10 +121,29 @@ export const getCaseRunTrace = async (caseId: string, runId?: string) => {
       )
     : { rows: [] };
 
+  const runIds = (runsResult.rows as Array<{ id?: string }>)
+    .map((row) => row.id)
+    .filter((id): id is string => Boolean(id));
+
+  const usageEventRows = runIds.length
+    ? await query(
+        `SELECT run_id, metadata_json
+         FROM case_analysis_events
+         WHERE run_id = ANY($1::uuid[])`,
+        [runIds]
+      )
+    : { rows: [] };
+
+  const runTokenUsageByRunId = aggregateEventTokenUsage(
+    usageEventRows.rows as Array<{ run_id?: string; metadata_json?: unknown }>
+  );
+
   return {
     runs: runsResult.rows,
     selectedRunId: selectedRunId || null,
     events: eventsResult.rows,
     shadow: shadowResult.rows[0] || null,
+    runTokenUsageByRunId,
+    selectedRunTokenUsage: selectedRunId ? runTokenUsageByRunId[selectedRunId] || null : null,
   };
 };

@@ -1,6 +1,5 @@
 import { Response, NextFunction } from 'express';
 import { query } from '../database/connection';
-import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth';
 
 export const addHealthMetric = async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -150,4 +149,3 @@ export const updateHealthGoal = async (req: AuthRequest, res: Response, next: Ne
     next(error);
   }
 };
-

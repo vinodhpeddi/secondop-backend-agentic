@@ -12,6 +12,7 @@ import { persistShadowTool } from '../tools/persist_shadow.tool';
 import { synthesizeSummaryTool } from '../tools/synthesize.tool';
 import { AgenticMode, AgenticRuntimeContext } from '../core/types';
 import { buildAgenticRunMetrics } from '../observability/metrics';
+import { isLangChainRuntimeEnabled, runAgenticViaLangChain } from '../langchain/adapter';
 
 interface RunAgenticCaseAnalysisOptions {
   caseId: string;
@@ -35,34 +36,61 @@ export const runAgenticCaseAnalysis = async (options: RunAgenticCaseAnalysisOpti
   const planner = new PlannerAgent();
   const critic = new CriticAgent();
   const finalizer = new FinalizerAgent();
+  const initialState = {
+    caseId: options.caseId,
+    runId: options.runId,
+    mode: options.mode,
+    stepCount: 0,
+    refinementCount: 0,
+    criticFeedback: null,
+    intake: null,
+    reports: [],
+    analysis: null,
+    observations: [],
+    finalArtifact: null,
+    criticScore: null,
+  };
 
   try {
-    const runtimeResult = await runAgenticRuntime({
-      context,
-      planner,
-      critic,
-      finalizer,
-      initialState: {
-        caseId: options.caseId,
-        runId: options.runId,
-        mode: options.mode,
-        stepCount: 0,
-        refinementCount: 0,
-        criticFeedback: null,
-        intake: null,
-        reports: [],
-        analysis: null,
-        observations: [],
-        finalArtifact: null,
-        criticScore: null,
-      },
-      tools: {
-        VALIDATE_INTAKE: validateIntakeTool,
-        EXTRACT_REPORTS: extractReportsTool,
-        SYNTHESIZE_SUMMARY: synthesizeSummaryTool,
-        GUARD_QUESTIONS: async (_context, state) => guardQuestionsTool(state),
-      },
-    });
+    const runNativeRuntime = async () =>
+      runAgenticRuntime({
+        context,
+        planner,
+        critic,
+        finalizer,
+        initialState,
+        tools: {
+          VALIDATE_INTAKE: validateIntakeTool,
+          EXTRACT_REPORTS: extractReportsTool,
+          SYNTHESIZE_SUMMARY: synthesizeSummaryTool,
+          GUARD_QUESTIONS: async (_context, state) => guardQuestionsTool(state),
+        },
+      });
+
+    let runtimeResult;
+    if (isLangChainRuntimeEnabled()) {
+      try {
+        const langchainResult = await runAgenticViaLangChain(context, initialState);
+        runtimeResult = {
+          state: langchainResult.state,
+          history: langchainResult.history,
+        };
+        logger.info(`LangChain runtime used for case ${options.caseId} (run ${options.runId})`);
+      } catch (error) {
+        const fallbackAllowed = (process.env.AGENTIC_LANGCHAIN_ALLOW_FALLBACK || 'true').toLowerCase() !== 'false';
+        if (!fallbackAllowed) {
+          throw error;
+        }
+
+        const fallbackReason = error instanceof Error ? error.message : 'Unknown LangChain runtime error';
+        logger.warn(
+          `LangChain runtime failed; falling back to native runtime for case ${options.caseId} (run ${options.runId}): ${fallbackReason}`
+        );
+        runtimeResult = await runNativeRuntime();
+      }
+    } else {
+      runtimeResult = await runNativeRuntime();
+    }
 
     if (!runtimeResult.state.finalArtifact) {
       throw new Error('Final artifact missing after runtime completion.');
@@ -93,18 +121,7 @@ export const runAgenticCaseAnalysis = async (options: RunAgenticCaseAnalysisOpti
     await persistShadowTool({
       context,
       state: {
-        caseId: options.caseId,
-        runId: options.runId,
-        mode: options.mode,
-        stepCount: 0,
-        refinementCount: 0,
-        criticFeedback: null,
-        intake: null,
-        reports: [],
-        analysis: null,
-        observations: [],
-        finalArtifact: null,
-        criticScore: null,
+        ...initialState,
       },
       artifact: {
         summary: '',

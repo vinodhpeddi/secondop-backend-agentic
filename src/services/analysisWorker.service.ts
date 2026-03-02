@@ -4,6 +4,7 @@ import { AgentError } from '../agents/core/agent.types';
 import { runCaseAnalysis } from '../agents/case-analysis/runCaseAnalysis';
 import { resolveAgenticMode } from '../agentic/core/policy';
 import { runAgenticCaseAnalysis } from '../agentic/orchestration/runAgenticCaseAnalysis';
+import { startPhoenixSpan } from '../observability/phoenix.service';
 import {
   createAnalysisRun,
   getLatestActiveAnalysisRun,
@@ -159,6 +160,11 @@ class AnalysisWorker {
   private async processCase(job: AnalysisQueueJob): Promise<void> {
     const { caseId, runId } = job;
     const mode = resolveAgenticMode();
+    const baselineRunSpan = startPhoenixSpan('analysis.baseline.run', {
+      caseId,
+      runId,
+      mode,
+    });
 
     try {
       await query(
@@ -181,6 +187,7 @@ class AnalysisWorker {
         executionMode: mode,
       });
 
+      baselineRunSpan.end('OK');
       logger.info(`Baseline analysis completed for case ${caseId} (run ${runId})`);
 
       if (mode === 'off') {
@@ -188,6 +195,11 @@ class AnalysisWorker {
       }
 
       const agenticRun = await createAnalysisRun(caseId, 'queued', 'agentic', mode);
+      const agenticRunSpan = startPhoenixSpan('analysis.agentic.run', {
+        caseId,
+        runId: agenticRun.id,
+        mode,
+      });
       await markAnalysisRunProcessing(agenticRun.id);
 
       try {
@@ -200,6 +212,7 @@ class AnalysisWorker {
         });
 
         await markAnalysisRunSucceeded(agenticRun.id, agenticResult.artifact.model);
+        agenticRunSpan.end('OK');
 
         if (mode === 'direct') {
           await query(
@@ -229,6 +242,7 @@ class AnalysisWorker {
             : 'Unknown agentic analysis error';
 
         await markAnalysisRunFailed(agenticRun.id, agenticMessage);
+        agenticRunSpan.end('ERROR', agenticMessage);
 
         if (mode === 'direct') {
           await query(
@@ -252,6 +266,8 @@ class AnalysisWorker {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown analysis error';
       const message = error instanceof AgentError ? `[${error.code}] ${errorMessage}` : errorMessage;
+
+      baselineRunSpan.end('ERROR', message);
 
       await query(
         `UPDATE cases

@@ -53,6 +53,7 @@ export const runAgenticRuntime = async (input: RunRuntimeInput) => {
         rationale: decision.rationale,
         step: state.stepCount,
         refinement: state.refinementCount,
+        plannerTokenUsage: decision.usage || null,
       },
     });
 
@@ -77,6 +78,7 @@ export const runAgenticRuntime = async (input: RunRuntimeInput) => {
             passed: criticScore.passed,
             score: criticScore.score,
             reasons: criticScore.reasons,
+            plannerTokenUsage: decision.usage || null,
           },
         });
 
@@ -85,6 +87,7 @@ export const runAgenticRuntime = async (input: RunRuntimeInput) => {
           action,
           rationale: decision.rationale,
           timestamp: new Date().toISOString(),
+          usage: decision.usage,
         });
 
         if (criticScore.passed) {
@@ -124,6 +127,8 @@ export const runAgenticRuntime = async (input: RunRuntimeInput) => {
           refinement: state.refinementCount,
           reportCount: state.reports.length,
           questionCount: state.analysis?.topQuestions.length || 0,
+          modelTokenUsage: action === 'SYNTHESIZE_SUMMARY' ? state.analysis?.usage || null : null,
+          plannerTokenUsage: decision.usage || null,
         },
       });
 
@@ -132,6 +137,7 @@ export const runAgenticRuntime = async (input: RunRuntimeInput) => {
         action,
         rationale: decision.rationale,
         timestamp: new Date().toISOString(),
+        usage: decision.usage,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown agentic step error';
@@ -145,6 +151,7 @@ export const runAgenticRuntime = async (input: RunRuntimeInput) => {
           rationale: decision.rationale,
           step: state.stepCount,
           refinement: state.refinementCount,
+          plannerTokenUsage: decision.usage || null,
         },
         errorText: message,
       });

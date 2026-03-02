@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { query } from '../database/connection';
 import { AppError } from './errorHandler';
-import logger from '../utils/logger';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -11,12 +11,64 @@ export interface AuthRequest extends Request {
   };
 }
 
+const isDevSkipAuthEnabled = (): boolean => {
+  return process.env.DEV_SKIP_AUTH === 'true' && process.env.NODE_ENV !== 'production';
+};
+
+const resolveDevUser = async (): Promise<{ id: string; email: string; type: 'patient' | 'doctor' }> => {
+  const configuredType = process.env.DEV_SKIP_AUTH_USER_TYPE;
+  const userType: 'patient' | 'doctor' = configuredType === 'doctor' ? 'doctor' : 'patient';
+  const configuredId = process.env.DEV_SKIP_AUTH_USER_ID;
+
+  const byIdResult = configuredId
+    ? await query(
+        `SELECT id, email, user_type
+         FROM users
+         WHERE id = $1 AND is_active = true
+         LIMIT 1`,
+        [configuredId]
+      )
+    : { rows: [] as Array<{ id: string; email: string | null; user_type: 'patient' | 'doctor' }> };
+
+  const userRow =
+    byIdResult.rows[0] ||
+    (
+      await query(
+        `SELECT id, email, user_type
+         FROM users
+         WHERE user_type = $1 AND is_active = true
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        [userType]
+      )
+    ).rows[0];
+
+  if (!userRow) {
+    throw new AppError(
+      `DEV_SKIP_AUTH is enabled but no active ${userType} user exists. Seed or register a user first.`,
+      500
+    );
+  }
+
+  return {
+    id: userRow.id,
+    email: userRow.email || `${userType}.dev@local`,
+    type: userRow.user_type,
+  };
+};
+
 export const authenticate = async (
   req: AuthRequest,
-  res: Response,
+  _res: Response,
   next: NextFunction
 ) => {
   try {
+    if (isDevSkipAuthEnabled()) {
+      req.user = await resolveDevUser();
+      next();
+      return;
+    }
+
     const token = req.headers.authorization?.replace('Bearer ', '') || req.cookies?.token;
 
     if (!token) {
@@ -43,7 +95,7 @@ export const authenticate = async (
 };
 
 export const authorize = (...roles: ('patient' | 'doctor')[]) => {
-  return (req: AuthRequest, res: Response, next: NextFunction) => {
+  return (req: AuthRequest, _res: Response, next: NextFunction) => {
     if (!req.user) {
       return next(new AppError('Authentication required', 401));
     }
@@ -55,4 +107,3 @@ export const authorize = (...roles: ('patient' | 'doctor')[]) => {
     next();
   };
 };
-

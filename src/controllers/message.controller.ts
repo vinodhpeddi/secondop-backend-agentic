@@ -1,6 +1,5 @@
 import { Response, NextFunction } from 'express';
 import { query } from '../database/connection';
-import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth';
 
 export const sendMessage = async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -91,4 +90,3 @@ export const deleteMessage = async (req: AuthRequest, res: Response, next: NextF
     next(error);
   }
 };
-

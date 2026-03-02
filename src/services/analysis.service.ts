@@ -16,6 +16,13 @@ export interface CaseAnalysisResult {
   summary: string;
   topQuestions: string[];
   model: string;
+  usage?: TokenUsageMetrics;
+}
+
+export interface TokenUsageMetrics {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
 }
 
 const summarySectionHeaders = [
@@ -196,6 +203,11 @@ export const generateCaseAnalysis = async (
     summary: validated.summary,
     topQuestions: validated.topQuestions,
     model: selectedModel,
+    usage: {
+      promptTokens: Number(completion?.usage?.prompt_tokens || 0),
+      completionTokens: Number(completion?.usage?.completion_tokens || 0),
+      totalTokens: Number(completion?.usage?.total_tokens || 0),
+    },
   };
 };
 

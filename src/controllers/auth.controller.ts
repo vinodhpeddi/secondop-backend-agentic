@@ -9,19 +9,21 @@ import logger from '../utils/logger';
 
 // Helper function to generate JWT token
 const generateToken = (userId: string, email: string, userType: 'patient' | 'doctor') => {
+  const expiresIn = (process.env.JWT_EXPIRES_IN || '7d') as jwt.SignOptions['expiresIn'];
   return jwt.sign(
     { id: userId, email, type: userType },
     process.env.JWT_SECRET!,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    { expiresIn }
   );
 };
 
 // Helper function to generate refresh token
 const generateRefreshToken = (userId: string) => {
+  const expiresIn = (process.env.JWT_REFRESH_EXPIRES_IN || '30d') as jwt.SignOptions['expiresIn'];
   return jwt.sign(
     { id: userId },
     process.env.JWT_REFRESH_SECRET!,
-    { expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d' }
+    { expiresIn }
   );
 };
 
@@ -330,7 +332,7 @@ export const refreshToken = async (req: Request, res: Response, next: NextFuncti
   }
 };
 
-export const logout = async (req: AuthRequest, res: Response, next: NextFunction) => {
+export const logout = async (_req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     res.json({
       status: 'success',
@@ -352,10 +354,11 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
     const result = await query('SELECT id FROM users WHERE email = $1', [email]);
 
     if (result.rows.length === 0) {
-      return res.json({
+      res.json({
         status: 'success',
         message: 'If the email exists, a reset link has been sent',
       });
+      return;
     }
 
     const userId = result.rows[0].id;
@@ -374,8 +377,10 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
       status: 'success',
       message: 'If the email exists, a reset link has been sent',
     });
+    return;
   } catch (error) {
     next(error);
+    return;
   }
 };
 
@@ -442,4 +447,3 @@ export const changePassword = async (req: AuthRequest, res: Response, next: Next
     next(error);
   }
 };
-

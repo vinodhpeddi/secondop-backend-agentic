@@ -1,21 +1,35 @@
 import multer from 'multer';
+import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError } from './errorHandler';
 
+const resolveUploadDir = (): string => {
+  const configured = process.env.UPLOAD_DIR || './uploads';
+  return path.isAbsolute(configured) ? configured : path.resolve(process.cwd(), configured);
+};
+
 // Configure storage
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, process.env.UPLOAD_DIR || './uploads');
+  destination: (_req, _file, cb) => {
+    const uploadDir = resolveUploadDir();
+
+    try {
+      fs.mkdirSync(uploadDir, { recursive: true });
+      cb(null, uploadDir);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to create upload directory';
+      cb(new AppError(`Upload directory error: ${message}`, 500), uploadDir);
+    }
   },
-  filename: (req, file, cb) => {
+  filename: (_req, file, cb) => {
     const uniqueName = `${uuidv4()}${path.extname(file.originalname)}`;
     cb(null, uniqueName);
   },
 });
 
 // File filter
-const fileFilter = (req: any, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+const fileFilter = (_req: unknown, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
   // Allowed file types
   const allowedMimeTypes = [
     'image/jpeg',
@@ -44,4 +58,3 @@ export const upload = multer({
     fileSize: parseInt(process.env.MAX_FILE_SIZE || '52428800'), // 50MB default
   },
 });
-

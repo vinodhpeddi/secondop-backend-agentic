@@ -5,6 +5,7 @@ import {
   AgenticLoopState,
   AgenticPlannerDecision,
   AgenticRuntimeContext,
+  AgenticTokenUsage,
 } from '../core/types';
 
 const fallbackAction = (state: AgenticLoopState): AgenticAction => {
@@ -28,6 +29,20 @@ const fallbackAction = (state: AgenticLoopState): AgenticAction => {
 };
 
 let cachedClient: OpenAI | null = null;
+
+const mapUsage = (usage: unknown): AgenticTokenUsage => {
+  const safe = (usage || {}) as {
+    prompt_tokens?: unknown;
+    completion_tokens?: unknown;
+    total_tokens?: unknown;
+  };
+
+  return {
+    promptTokens: Number(safe.prompt_tokens || 0),
+    completionTokens: Number(safe.completion_tokens || 0),
+    totalTokens: Number(safe.total_tokens || 0),
+  };
+};
 
 const getClient = (): OpenAI | null => {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -116,21 +131,34 @@ export class PlannerAgent {
 
     const raw = completion.choices[0]?.message?.content;
     if (!raw) {
-      return { action: fallback, rationale: 'Empty planner response; fallback selected.' };
+      return {
+        action: fallback,
+        rationale: 'Empty planner response; fallback selected.',
+        usage: mapUsage(completion.usage),
+      };
     }
 
     try {
       const parsed = JSON.parse(raw) as AgenticPlannerDecision;
       if (!parsed.action) {
-        return { action: fallback, rationale: 'Planner action missing; fallback selected.' };
+        return {
+          action: fallback,
+          rationale: 'Planner action missing; fallback selected.',
+          usage: mapUsage(completion.usage),
+        };
       }
 
       return {
         action: parsed.action,
         rationale: parsed.rationale || 'Planner selected action.',
+        usage: mapUsage(completion.usage),
       };
     } catch {
-      return { action: fallback, rationale: 'Planner JSON parse failed; fallback selected.' };
+      return {
+        action: fallback,
+        rationale: 'Planner JSON parse failed; fallback selected.',
+        usage: mapUsage(completion.usage),
+      };
     }
   }
 }
