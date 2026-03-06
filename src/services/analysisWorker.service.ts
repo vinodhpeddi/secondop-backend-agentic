@@ -70,6 +70,7 @@ class AnalysisWorker {
       });
 
       await this.boss.start();
+      await this.boss.createQueue(queueName);
 
       await this.boss.work(queueName, async (jobs) => {
         for (const job of jobs) {
