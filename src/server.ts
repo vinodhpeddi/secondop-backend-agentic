@@ -37,6 +37,7 @@ initializePhoenixObservability();
 
 const app: Application = express();
 const httpServer = createServer(app);
+app.set('trust proxy', 1);
 
 // Initialize Socket.IO
 const io = new SocketIOServer(httpServer, {
