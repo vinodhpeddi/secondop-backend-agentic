@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { v4 as uuidv4 } from 'uuid';
 import { query, transaction } from '../database/connection';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth';
@@ -141,7 +142,7 @@ export const createCase = async (req: AuthRequest, res: Response, next: NextFunc
     const status = req.body.status === 'draft' ? 'draft' : 'pending';
     const intake = parseIntake(req.body.intake);
 
-    const caseNumber = `SO${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const caseNumber = `SO-${uuidv4()}`;
 
     const created = await transaction(async (client) => {
       const caseInsert = await client.query(

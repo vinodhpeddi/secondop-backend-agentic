@@ -1,3 +1,4 @@
+import PgBoss from 'pg-boss';
 import { query } from '../database/connection';
 import logger from '../utils/logger';
 import { AgentError } from '../agents/core/agent.types';
@@ -16,6 +17,7 @@ import {
 
 const maxCharsPerFile = parseInt(process.env.ANALYSIS_MAX_CHARS_PER_FILE || '12000', 10);
 const maxTotalChars = parseInt(process.env.ANALYSIS_MAX_TOTAL_CHARS || '30000', 10);
+const queueName = process.env.ANALYSIS_QUEUE_NAME || 'case-analysis-baseline';
 
 interface AnalysisQueueJob {
   caseId: string;
@@ -28,11 +30,73 @@ interface QueueCaseResult {
 }
 
 class AnalysisWorker {
-  private queue: AnalysisQueueJob[] = [];
-  private queuedSet = new Set<string>();
-  private running = false;
+  private boss: PgBoss | null = null;
+  private startPromise: Promise<void> | null = null;
+
+  private buildConnectionString(): string {
+    if (process.env.DATABASE_URL) {
+      return process.env.DATABASE_URL;
+    }
+
+    const host = process.env.DB_HOST || 'localhost';
+    const port = process.env.DB_PORT || '5432';
+    const database = process.env.DB_NAME || 'secondop_db';
+    const user = encodeURIComponent(process.env.DB_USER || 'postgres');
+    const password = process.env.DB_PASSWORD ? encodeURIComponent(process.env.DB_PASSWORD) : '';
+    const auth = password ? `${user}:${password}` : user;
+    const sslSuffix = process.env.DB_SSL === 'true' ? '?sslmode=require' : '';
+
+    return `postgres://${auth}@${host}:${port}/${database}${sslSuffix}`;
+  }
+
+  private buildBoss(): PgBoss {
+    return new PgBoss({
+      schema: process.env.ANALYSIS_QUEUE_SCHEMA || 'pgboss',
+      connectionString: this.buildConnectionString(),
+    });
+  }
+
+  private async ensureStarted(): Promise<void> {
+    if (this.startPromise) {
+      await this.startPromise;
+      return;
+    }
+
+    this.startPromise = (async () => {
+      this.boss = this.buildBoss();
+      this.boss.on('error', (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`pg-boss error: ${message}`);
+      });
+
+      await this.boss.start();
+
+      await this.boss.work(queueName, async (jobs) => {
+        for (const job of jobs) {
+          const payload = job.data as AnalysisQueueJob | undefined;
+          if (!payload?.caseId || !payload?.runId) {
+            logger.error('Invalid analysis queue payload received; skipping job');
+            continue;
+          }
+
+          await this.processCase(payload);
+        }
+      });
+
+      logger.info(`Analysis queue worker started on queue '${queueName}'`);
+    })();
+
+    await this.startPromise;
+  }
+
+  private async enqueue(job: AnalysisQueueJob): Promise<void> {
+    await this.ensureStarted();
+    await this.boss!.send(queueName, job);
+  }
 
   public async recoverInterruptedJobs(): Promise<void> {
+    await this.ensureStarted();
+
     const result = await query(
       `SELECT id, analysis_status
        FROM cases
@@ -67,29 +131,43 @@ class AnalysisWorker {
         run = await createAnalysisRun(row.id, 'queued', 'baseline', resolveAgenticMode());
       }
 
-      this.enqueue({
+      await this.enqueue({
         caseId: row.id,
         runId: run.id,
       });
     }
 
-    if (rows.length > 0) {
-      logger.info(`Recovered ${rows.length} queued analysis job(s)`);
+    const queuedRuns = await query(
+      `SELECT id, case_id
+       FROM case_analysis_runs
+       WHERE engine = 'baseline' AND status = 'queued'
+       ORDER BY created_at ASC
+       LIMIT 500`
+    );
+
+    for (const run of queuedRuns.rows as Array<{ id: string; case_id: string }>) {
+      await this.enqueue({
+        caseId: run.case_id,
+        runId: run.id,
+      });
     }
 
-    void this.processQueue();
+    if (rows.length > 0 || queuedRuns.rows.length > 0) {
+      logger.info(`Recovered ${rows.length} case(s) and re-enqueued ${queuedRuns.rows.length} queued baseline run(s)`);
+    }
   }
 
   public async queueCase(caseId: string): Promise<QueueCaseResult> {
+    await this.ensureStarted();
+
     const mode = resolveAgenticMode();
     const activeRun = await getLatestActiveAnalysisRun(caseId, 'baseline');
     if (activeRun) {
       if (activeRun.status === 'queued') {
-        this.enqueue({
+        await this.enqueue({
           caseId,
           runId: activeRun.id,
         });
-        void this.processQueue();
       }
 
       return {
@@ -114,47 +192,15 @@ class AnalysisWorker {
 
     const run = await createAnalysisRun(caseId, 'queued', 'baseline', mode);
 
-    this.enqueue({
+    await this.enqueue({
       caseId,
       runId: run.id,
     });
-    void this.processQueue();
 
     return {
       analysisRunId: run.id,
       analysisStatus: 'queued',
     };
-  }
-
-  private enqueue(job: AnalysisQueueJob): void {
-    if (this.queuedSet.has(job.caseId)) {
-      return;
-    }
-
-    this.queue.push(job);
-    this.queuedSet.add(job.caseId);
-  }
-
-  private async processQueue(): Promise<void> {
-    if (this.running) {
-      return;
-    }
-
-    this.running = true;
-
-    try {
-      while (this.queue.length > 0) {
-        const job = this.queue.shift();
-        if (!job) {
-          continue;
-        }
-
-        this.queuedSet.delete(job.caseId);
-        await this.processCase(job);
-      }
-    } finally {
-      this.running = false;
-    }
   }
 
   private async processCase(job: AnalysisQueueJob): Promise<void> {
@@ -167,6 +213,13 @@ class AnalysisWorker {
     });
 
     try {
+      const claimedBaselineRun = await markAnalysisRunProcessing(runId);
+      if (!claimedBaselineRun) {
+        logger.info(`Skipping analysis run ${runId} for case ${caseId}; already claimed by another worker.`);
+        baselineRunSpan.end('OK');
+        return;
+      }
+
       await query(
         `UPDATE cases
          SET analysis_status = 'processing',
@@ -176,8 +229,6 @@ class AnalysisWorker {
          WHERE id = $1`,
         [caseId]
       );
-
-      await markAnalysisRunProcessing(runId);
 
       await runCaseAnalysis({
         caseId,
@@ -200,7 +251,10 @@ class AnalysisWorker {
         runId: agenticRun.id,
         mode,
       });
-      await markAnalysisRunProcessing(agenticRun.id);
+      const claimedAgenticRun = await markAnalysisRunProcessing(agenticRun.id);
+      if (!claimedAgenticRun) {
+        throw new Error(`Agentic run ${agenticRun.id} could not be claimed for processing.`);
+      }
 
       try {
         const agenticResult = await runAgenticCaseAnalysis({
@@ -287,7 +341,19 @@ class AnalysisWorker {
       }
 
       logger.error(`Analysis failed for case ${caseId} (run ${runId}): ${message}`);
+      throw error;
     }
+  }
+
+  public async shutdown(): Promise<void> {
+    if (!this.boss) {
+      return;
+    }
+
+    await this.boss.stop();
+    logger.info('Analysis queue worker stopped');
+    this.boss = null;
+    this.startPromise = null;
   }
 }
 

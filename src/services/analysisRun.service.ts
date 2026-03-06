@@ -175,14 +175,18 @@ export const getLatestActiveAnalysisRun = async (
   return mapAnalysisRunRow(result.rows[0] as Record<string, unknown>);
 };
 
-export const markAnalysisRunProcessing = async (runId: string): Promise<void> => {
-  await query(
+export const markAnalysisRunProcessing = async (runId: string): Promise<boolean> => {
+  const result = await query(
     `UPDATE case_analysis_runs
      SET status = 'processing',
          started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
-     WHERE id = $1`,
+     WHERE id = $1
+       AND status = 'queued'
+     RETURNING id`,
     [runId]
   );
+
+  return result.rows.length > 0;
 };
 
 export const markAnalysisRunQueued = async (runId: string, errorMessage?: string): Promise<void> => {

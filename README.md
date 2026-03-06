@@ -229,6 +229,28 @@ npm start
 npm run lint
 ```
 
+## ✅ E2E Smoke Tests (Deployed API)
+
+Use this to validate core end-to-end backend flow after deployment.
+
+```bash
+# Uses default production URL:
+npm run e2e:smoke
+
+# Or target a custom URL:
+E2E_API_BASE_URL=https://your-api-domain npm run e2e:smoke
+```
+
+Optional analysis path (upload PDF + queue + poll):
+
+```bash
+E2E_API_BASE_URL=https://your-api-domain npm run e2e:smoke:analysis
+```
+
+Notes:
+- The smoke script creates a unique patient account each run.
+- Analysis mode may take longer and depends on analysis runtime/config.
+
 ## 📝 API Response Format
 
 All API responses follow this format:
@@ -297,4 +319,3 @@ Key dependencies:
 ## 📄 License
 
 Proprietary - SecondOp Platform
-

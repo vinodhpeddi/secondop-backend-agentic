@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
@@ -32,6 +33,14 @@ const generateOTP = (): string => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
+const hashSecret = (value: string): string => {
+  return crypto.createHash('sha256').update(value).digest('hex');
+};
+
+const bcryptRounds = Number.isFinite(Number(process.env.BCRYPT_ROUNDS))
+  ? Math.max(12, parseInt(process.env.BCRYPT_ROUNDS as string, 10))
+  : 12;
+
 export const register = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { email, phone, password, userType, firstName, lastName } = req.body;
@@ -56,7 +65,7 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
     }
 
     // Hash password
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(password, bcryptRounds);
 
     // Create user and profile in transaction
     const result = await transaction(async (client) => {
@@ -213,11 +222,11 @@ export const loginWithPhone = async (req: Request, res: Response, next: NextFunc
     await query(
       `INSERT INTO otp_verifications (user_id, phone, otp_code, purpose, expires_at)
        VALUES ($1, $2, $3, 'login', $4)`,
-      [userId, phone, otpCode, expiresAt]
+      [userId, phone, hashSecret(otpCode), expiresAt]
     );
 
     // TODO: Send OTP via SMS (Twilio integration)
-    logger.info(`OTP generated for phone ${phone}: ${otpCode}`);
+    logger.info(`OTP generated for phone ${phone}`);
 
     res.json({
       status: 'success',
@@ -246,7 +255,7 @@ export const verifyOTP = async (req: Request, res: Response, next: NextFunction)
       `SELECT * FROM otp_verifications
        WHERE user_id = $1 AND otp_code = $2 AND is_used = false AND expires_at > NOW()
        ORDER BY created_at DESC LIMIT 1`,
-      [userId, otp]
+      [userId, hashSecret(otp)]
     );
 
     if (result.rows.length === 0) {
@@ -368,10 +377,10 @@ export const forgotPassword = async (req: Request, res: Response, next: NextFunc
     await query(
       `INSERT INTO otp_verifications (user_id, email, otp_code, purpose, expires_at)
        VALUES ($1, $2, $3, 'password_reset', $4)`,
-      [userId, email, resetToken, expiresAt]
+      [userId, email, hashSecret(resetToken), expiresAt]
     );
 
-    logger.info(`Password reset token generated for ${email}: ${resetToken}`);
+    logger.info(`Password reset requested for ${email}`);
 
     res.json({
       status: 'success',
@@ -395,7 +404,7 @@ export const resetPassword = async (req: Request, res: Response, next: NextFunct
     const result = await query(
       `SELECT user_id FROM otp_verifications
        WHERE otp_code = $1 AND purpose = 'password_reset' AND is_used = false AND expires_at > NOW()`,
-      [token]
+      [hashSecret(token)]
     );
 
     if (result.rows.length === 0) {
@@ -403,10 +412,10 @@ export const resetPassword = async (req: Request, res: Response, next: NextFunct
     }
 
     const userId = result.rows[0].user_id;
-    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const passwordHash = await bcrypt.hash(newPassword, bcryptRounds);
 
     await query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
-    await query('UPDATE otp_verifications SET is_used = true WHERE otp_code = $1', [token]);
+    await query('UPDATE otp_verifications SET is_used = true WHERE otp_code = $1', [hashSecret(token)]);
 
     res.json({
       status: 'success',
@@ -436,7 +445,7 @@ export const changePassword = async (req: AuthRequest, res: Response, next: Next
       throw new AppError('Current password is incorrect', 401);
     }
 
-    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const passwordHash = await bcrypt.hash(newPassword, bcryptRounds);
     await query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, req.user!.id]);
 
     res.json({

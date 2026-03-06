@@ -11,6 +11,12 @@ export interface AuthRequest extends Request {
   };
 }
 
+interface JwtPayload {
+  id: string;
+  email: string;
+  type: 'patient' | 'doctor';
+}
+
 const isDevSkipAuthEnabled = (): boolean => {
   return process.env.DEV_SKIP_AUTH === 'true' && process.env.NODE_ENV !== 'production';
 };
@@ -75,13 +81,27 @@ export const authenticate = async (
       throw new AppError('Authentication required', 401);
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
-      id: string;
-      email: string;
-      type: 'patient' | 'doctor';
-    };
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as JwtPayload;
 
-    req.user = decoded;
+    const userResult = await query(
+      `SELECT id, email, user_type
+       FROM users
+       WHERE id = $1 AND is_active = true
+       LIMIT 1`,
+      [decoded.id]
+    );
+
+    if (userResult.rows.length === 0) {
+      throw new AppError('Account is unavailable', 401);
+    }
+
+    const user = userResult.rows[0] as { id: string; email: string | null; user_type: 'patient' | 'doctor' };
+
+    req.user = {
+      id: user.id,
+      email: user.email || decoded.email,
+      type: user.user_type,
+    };
     next();
   } catch (error) {
     if (error instanceof jwt.JsonWebTokenError) {
