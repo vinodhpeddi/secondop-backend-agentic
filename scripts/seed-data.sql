@@ -18,9 +18,9 @@ INSERT INTO subscription_plans (name, description, price, billing_cycle, feature
 
 -- Insert sample doctors (passwords are 'password123' hashed with bcrypt)
 INSERT INTO users (email, phone, password_hash, user_type, is_verified, is_active) VALUES
-('dr.smith@secondop.com', '+1234567890', '$2a$10$rKZvVvJvJvJvJvJvJvJvJeO7vJvJvJvJvJvJvJvJvJvJvJvJvJvJv', 'doctor', true, true),
-('dr.johnson@secondop.com', '+1234567891', '$2a$10$rKZvVvJvJvJvJvJvJvJvJeO7vJvJvJvJvJvJvJvJvJvJvJvJvJvJv', 'doctor', true, true),
-('dr.williams@secondop.com', '+1234567892', '$2a$10$rKZvVvJvJvJvJvJvJvJvJeO7vJvJvJvJvJvJvJvJvJvJvJvJvJvJv', 'doctor', true, true);
+('dr.smith@secondop.com', '+1234567890', '$2a$10$HZhiAofIrWgvSqU1K3zyleIKzWYJyY1saS1YSAp6JxJUYQincV1u.', 'doctor', true, true),
+('dr.johnson@secondop.com', '+1234567891', '$2a$10$HZhiAofIrWgvSqU1K3zyleIKzWYJyY1saS1YSAp6JxJUYQincV1u.', 'doctor', true, true),
+('dr.williams@secondop.com', '+1234567892', '$2a$10$HZhiAofIrWgvSqU1K3zyleIKzWYJyY1saS1YSAp6JxJUYQincV1u.', 'doctor', true, true);
 
 -- Get the user IDs for the doctors
 DO $$
@@ -59,7 +59,7 @@ END $$;
 
 -- Insert a sample patient (password is 'password123')
 INSERT INTO users (email, phone, password_hash, user_type, is_verified, is_active) VALUES
-('patient@example.com', '+1234567899', '$2a$10$rKZvVvJvJvJvJvJvJvJvJeO7vJvJvJvJvJvJvJvJvJvJvJvJvJvJv', 'patient', true, true);
+('patient@example.com', '+1234567899', '$2a$10$HZhiAofIrWgvSqU1K3zyleIKzWYJyY1saS1YSAp6JxJUYQincV1u.', 'patient', true, true);
 
 DO $$
 DECLARE
