@@ -62,6 +62,12 @@ psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/006_agent_ana
 echo "  → Running 007_agentic_shadow_results.sql..."
 psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/007_agentic_shadow_results.sql
 
+echo "  → Running 008_case_analysis_artifacts.sql..."
+psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/008_case_analysis_artifacts.sql
+
+echo "  → Running 009_dicom_imaging_and_annotations.sql..."
+psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f migrations/009_dicom_imaging_and_annotations.sql
+
 echo "✅ All migrations completed successfully"
 
 # Create uploads directory

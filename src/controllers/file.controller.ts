@@ -4,6 +4,13 @@ import fs from 'fs';
 import { query } from '../database/connection';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth';
+import {
+  extractAndPersistDicomMetadata,
+  getPersistedAnnotations,
+  parseDicomAnnotations,
+  parseDicomViewport,
+  savePersistedAnnotations,
+} from '../services/dicomImaging.service';
 
 interface AuthorizedFileRow {
   id: string;
@@ -18,6 +25,8 @@ interface AuthorizedFileRow {
   description: string | null;
   metadata: unknown;
   is_dicom: boolean;
+  dicom_extraction_status?: 'pending' | 'succeeded' | 'failed' | null;
+  dicom_extraction_error?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -44,12 +53,15 @@ const findAccessibleCasePatientId = async (caseId: string, userId: string): Prom
 
 const getAccessibleFileById = async (fileId: string, userId: string): Promise<AuthorizedFileRow> => {
   const result = await query(
-    `SELECT mf.*
+    `SELECT mf.*,
+            di.dicom_extraction_status,
+            di.dicom_extraction_error
      FROM medical_files mf
      JOIN patients p ON p.id = mf.patient_id
      LEFT JOIN cases c ON c.id = mf.case_id
      LEFT JOIN case_assignments ca ON ca.case_id = c.id
      LEFT JOIN doctors d ON d.id = ca.doctor_id
+     LEFT JOIN dicom_instances di ON di.file_id = mf.id
      WHERE mf.id = $1
        AND (p.user_id = $2 OR d.user_id = $2)
      ORDER BY mf.created_at DESC
@@ -103,9 +115,20 @@ export const uploadFile = async (req: AuthRequest, res: Response, next: NextFunc
       [caseId, patientId, userId, req.file.originalname, req.file.mimetype, req.file.size, fileUrl, category, description, isDicom]
     );
 
+    const fileRecord = result.rows[0] as { id: string; case_id: string };
+
+    if (isDicom) {
+      const filePath = resolveStoredFilePath(fileUrl);
+      await extractAndPersistDicomMetadata({
+        fileId: fileRecord.id,
+        caseId: fileRecord.case_id,
+        filePath,
+      });
+    }
+
     res.status(201).json({
       status: 'success',
-      data: result.rows[0],
+      data: fileRecord,
     });
   } catch (error) {
     next(error);
@@ -118,12 +141,15 @@ export const getFiles = async (req: AuthRequest, res: Response, next: NextFuncti
     const userId = req.user!.id;
     const params: unknown[] = [userId];
     let queryStr =
-      `SELECT DISTINCT mf.*
+      `SELECT DISTINCT mf.*,
+              di.dicom_extraction_status,
+              di.dicom_extraction_error
        FROM medical_files mf
        JOIN patients p ON p.id = mf.patient_id
        LEFT JOIN cases c ON c.id = mf.case_id
        LEFT JOIN case_assignments ca ON ca.case_id = c.id
        LEFT JOIN doctors d ON d.id = ca.doctor_id
+       LEFT JOIN dicom_instances di ON di.file_id = mf.id
        WHERE (p.user_id = $1 OR d.user_id = $1)`;
 
     if (caseId && typeof caseId !== 'string') {
@@ -195,6 +221,65 @@ export const deleteFile = async (req: AuthRequest, res: Response, next: NextFunc
       message: 'File deleted successfully',
     });
   } catch (error) {
+    next(error);
+  }
+};
+
+export const getFileAnnotations = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const { fileId } = req.params;
+    const file = await getAccessibleFileById(fileId, req.user!.id);
+    const persisted = await getPersistedAnnotations(file.id, req.user!.id);
+
+    res.json({
+      status: 'success',
+      data: persisted || {
+        fileId: file.id,
+        annotations: [],
+        viewport: null,
+        sopInstanceUid: null,
+        updatedAt: null,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const saveFileAnnotations = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const { fileId } = req.params;
+    const file = await getAccessibleFileById(fileId, req.user!.id);
+
+    const annotations = parseDicomAnnotations(req.body.annotations);
+    const viewport = parseDicomViewport(req.body.viewport);
+    const sopInstanceUid =
+      typeof req.body.sopInstanceUid === 'string' && req.body.sopInstanceUid.trim()
+        ? req.body.sopInstanceUid.trim()
+        : null;
+
+    const persisted = await savePersistedAnnotations({
+      fileId: file.id,
+      caseId: file.case_id || '',
+      savedBy: req.user!.id,
+      sopInstanceUid,
+      annotations,
+      viewport,
+    });
+
+    res.json({
+      status: 'success',
+      data: persisted,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('annotations') || error.message.includes('viewport'))
+    ) {
+      next(new AppError(error.message, 400));
+      return;
+    }
+
     next(error);
   }
 };

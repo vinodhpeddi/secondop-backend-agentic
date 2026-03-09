@@ -12,6 +12,7 @@ import {
 import { getLatestAnalysisRun, getLatestAnalysisRunByEngine, getLatestShadowResultByCaseId } from '../services/analysisRun.service';
 import { getCaseRunTrace } from '../agentic/observability/analysisObservability.service';
 import { analysisWorker } from '../services/analysisWorker.service';
+import { getImagingStudiesForCase } from '../services/dicomImaging.service';
 
 interface IntakePayload {
   age: number;
@@ -544,13 +545,25 @@ export const getCaseById = async (req: AuthRequest, res: Response, next: NextFun
     );
 
     const filesResult = await query(
-      `SELECT id, file_name, file_type, file_size, file_url, file_category, description, is_dicom, created_at
-       FROM medical_files
+      `SELECT mf.id,
+              mf.file_name,
+              mf.file_type,
+              mf.file_size,
+              mf.file_url,
+              mf.file_category,
+              mf.description,
+              mf.is_dicom,
+              di.dicom_extraction_status,
+              di.dicom_extraction_error,
+              mf.created_at
+       FROM medical_files mf
+       LEFT JOIN dicom_instances di ON di.file_id = mf.id
        WHERE case_id = $1
-       ORDER BY created_at DESC`,
+       ORDER BY mf.created_at DESC`,
       [caseId]
     );
     const assignedDoctors = await fetchAssignedDoctors(caseId);
+    const imagingStudies = await getImagingStudiesForCase(caseId);
 
     res.json({
       status: 'success',
@@ -558,6 +571,7 @@ export const getCaseById = async (req: AuthRequest, res: Response, next: NextFun
         ...caseResult.rows[0],
         intake: intakeResult.rows[0] || null,
         files: filesResult.rows,
+        imagingStudies,
         assigned_doctors: assignedDoctors,
       },
     });
