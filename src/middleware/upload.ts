@@ -30,6 +30,9 @@ const storage = multer.diskStorage({
 
 // File filter
 const fileFilter = (_req: unknown, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+  const extension = path.extname(file.originalname).toLowerCase();
+  const isDicomByExtension = extension === '.dcm' || extension === '.dicom';
+
   // Allowed file types
   const allowedMimeTypes = [
     'image/jpeg',
@@ -38,6 +41,7 @@ const fileFilter = (_req: unknown, file: Express.Multer.File, cb: multer.FileFil
     'application/pdf',
     'application/dicom',
     'application/x-dicom',
+    'application/octet-stream',
     'application/msword',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'application/vnd.ms-excel',
@@ -45,6 +49,11 @@ const fileFilter = (_req: unknown, file: Express.Multer.File, cb: multer.FileFil
   ];
 
   if (allowedMimeTypes.includes(file.mimetype)) {
+    if (file.mimetype === 'application/octet-stream' && !isDicomByExtension) {
+      cb(new AppError('Invalid file type', 400));
+      return;
+    }
+
     cb(null, true);
   } else {
     cb(new AppError('Invalid file type', 400));

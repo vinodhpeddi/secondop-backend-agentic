@@ -69,6 +69,16 @@ const resolveStoredFilePath = (fileUrl: string): string => {
   return path.join(process.cwd(), relativePath);
 };
 
+const isDicomUpload = (file: Express.Multer.File): boolean => {
+  const extension = path.extname(file.originalname).toLowerCase();
+  return (
+    file.mimetype === 'application/dicom' ||
+    file.mimetype === 'application/x-dicom' ||
+    ((file.mimetype === 'application/octet-stream' || file.mimetype === 'application/dcm') &&
+      (extension === '.dcm' || extension === '.dicom'))
+  );
+};
+
 export const uploadFile = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     if (!req.file) {
@@ -84,7 +94,7 @@ export const uploadFile = async (req: AuthRequest, res: Response, next: NextFunc
 
     const patientId = await findAccessibleCasePatientId(caseId, userId);
     const fileUrl = `/uploads/${req.file.filename}`;
-    const isDicom = req.file.mimetype === 'application/dicom' || req.file.mimetype === 'application/x-dicom';
+    const isDicom = isDicomUpload(req.file);
 
     const result = await query(
       `INSERT INTO medical_files (case_id, patient_id, uploaded_by, file_name, file_type, file_size, file_url, file_category, description, is_dicom)
