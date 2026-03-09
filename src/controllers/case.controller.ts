@@ -4,6 +4,11 @@ import { query, transaction } from '../database/connection';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth';
 import { extractObservationsFromSummary } from '../services/analysis.service';
+import {
+  artifactQuestionsToStrings,
+  extractObservationsFromArtifact,
+  hydrateCaseAnalysisArtifact,
+} from '../services/analysisArtifact.service';
 import { getLatestAnalysisRun, getLatestAnalysisRunByEngine, getLatestShadowResultByCaseId } from '../services/analysisRun.service';
 import { getCaseRunTrace } from '../agentic/observability/analysisObservability.service';
 import { analysisWorker } from '../services/analysisWorker.service';
@@ -127,6 +132,33 @@ const parseSpecialistQuestions = (input: unknown): string[] => {
 
     return value.trim();
   });
+};
+
+const fetchAssignedDoctors = async (caseId: string) => {
+  const assignments = await query(
+    `SELECT ca.id,
+            ca.status,
+            ca.assigned_date,
+            d.id AS doctor_id,
+            d.user_id,
+            d.first_name,
+            d.last_name,
+            d.specialty,
+            d.rating,
+            d.review_count,
+            d.country,
+            d.city,
+            d.consultation_fee,
+            u.email
+     FROM case_assignments ca
+     JOIN doctors d ON d.id = ca.doctor_id
+     JOIN users u ON u.id = d.user_id
+     WHERE ca.case_id = $1
+     ORDER BY ca.assigned_date ASC`,
+    [caseId]
+  );
+
+  return assignments.rows;
 };
 
 export const createCase = async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -286,7 +318,7 @@ export const getCaseAnalysis = async (req: AuthRequest, res: Response, next: Nex
     await ensureCaseAccess(caseId, userId, userType);
 
     const result = await query(
-      `SELECT analysis_status, analysis_summary, analysis_questions, analysis_error
+      `SELECT analysis_status, analysis_summary, analysis_questions, analysis_artifact, analysis_model, analysis_error
        FROM cases
        WHERE id = $1`,
       [caseId]
@@ -300,19 +332,30 @@ export const getCaseAnalysis = async (req: AuthRequest, res: Response, next: Nex
       analysis_status: string;
       analysis_summary: string | null;
       analysis_questions: string[] | null;
+      analysis_artifact: unknown;
+      analysis_model: string | null;
       analysis_error: string | null;
     };
 
     const latestRun = await getLatestAnalysisRun(caseId);
+    const artifact = hydrateCaseAnalysisArtifact({
+      artifact: row.analysis_artifact,
+      summary: row.analysis_summary,
+      questions: row.analysis_questions,
+      model: row.analysis_model,
+    });
     const observations =
-      typeof row.analysis_summary === "string" && row.analysis_summary.trim()
-        ? extractObservationsFromSummary(row.analysis_summary)
-        : null;
+      artifact
+        ? extractObservationsFromArtifact(artifact)
+        : typeof row.analysis_summary === "string" && row.analysis_summary.trim()
+          ? extractObservationsFromSummary(row.analysis_summary)
+          : null;
 
     const payload: Record<string, unknown> = {
       analysisStatus: row.analysis_status,
-      summary: row.analysis_summary,
-      analysisQuestions: row.analysis_questions,
+      summary: artifact ? artifact.structured_summary.chief_concern || row.analysis_summary : row.analysis_summary,
+      analysisQuestions: artifact ? artifactQuestionsToStrings(artifact) : row.analysis_questions,
+      artifact,
       error: row.analysis_error,
       analysisRunId: latestRun?.id || null,
       observations,
@@ -405,12 +448,54 @@ export const getCases = async (req: AuthRequest, res: Response, next: NextFuncti
     const patientId = await getPatientIdForUser(userId);
 
     const result = await query(
-      `SELECT c.*, ci.age_at_submission, ci.sex, ci.specialty_context
+      `SELECT c.*,
+              ci.age_at_submission,
+              ci.sex,
+              ci.specialty_context,
+              COALESCE(assigned_doctors.assigned_doctors, '[]'::json) AS assigned_doctors,
+              latest_message.latest_message_preview,
+              latest_message.latest_message_created_at,
+              latest_message.latest_message_sender_name,
+              COALESCE(latest_message.has_unread_messages, false) AS has_unread_messages
        FROM cases c
        LEFT JOIN case_intake ci ON ci.case_id = c.id
+       LEFT JOIN LATERAL (
+         SELECT json_agg(
+                  json_build_object(
+                    'doctorId', d.id,
+                    'userId', d.user_id,
+                    'name', CONCAT(d.first_name, ' ', d.last_name),
+                    'specialty', d.specialty,
+                    'status', ca.status
+                  )
+                  ORDER BY ca.assigned_date ASC
+                ) AS assigned_doctors
+         FROM case_assignments ca
+         JOIN doctors d ON d.id = ca.doctor_id
+         WHERE ca.case_id = c.id
+       ) assigned_doctors ON true
+       LEFT JOIN LATERAL (
+         SELECT m.content AS latest_message_preview,
+                m.created_at AS latest_message_created_at,
+                COALESCE(dp.first_name || ' ' || dp.last_name, dd.first_name || ' ' || dd.last_name, us.email) AS latest_message_sender_name,
+                EXISTS(
+                  SELECT 1
+                  FROM messages unread
+                  WHERE unread.case_id = c.id
+                    AND unread.receiver_id = $2
+                    AND unread.is_read = false
+                ) AS has_unread_messages
+         FROM messages m
+         JOIN users us ON us.id = m.sender_id
+         LEFT JOIN patients dp ON dp.user_id = m.sender_id
+         LEFT JOIN doctors dd ON dd.user_id = m.sender_id
+         WHERE m.case_id = c.id
+         ORDER BY m.created_at DESC
+         LIMIT 1
+       ) latest_message ON true
        WHERE c.patient_id = $1
        ORDER BY c.submitted_date DESC`,
-      [patientId]
+      [patientId, userId]
     );
 
     res.json({
@@ -430,7 +515,22 @@ export const getCaseById = async (req: AuthRequest, res: Response, next: NextFun
 
     await ensureCaseAccess(caseId, userId, userType);
 
-    const caseResult = await query('SELECT * FROM cases WHERE id = $1', [caseId]);
+    const caseResult = await query(
+      `SELECT c.*,
+              p.first_name AS patient_first_name,
+              p.last_name AS patient_last_name,
+              p.user_id AS patient_user_id,
+              p.gender AS patient_gender,
+              p.country AS patient_country,
+              p.city AS patient_city,
+              u.email AS patient_email,
+              u.phone AS patient_phone
+       FROM cases c
+       JOIN patients p ON p.id = c.patient_id
+       JOIN users u ON u.id = p.user_id
+       WHERE c.id = $1`,
+      [caseId]
+    );
 
     if (caseResult.rows.length === 0) {
       throw new AppError('Case not found', 404);
@@ -444,12 +544,13 @@ export const getCaseById = async (req: AuthRequest, res: Response, next: NextFun
     );
 
     const filesResult = await query(
-      `SELECT id, file_name, file_type, file_size, file_url, file_category, description, created_at
+      `SELECT id, file_name, file_type, file_size, file_url, file_category, description, is_dicom, created_at
        FROM medical_files
        WHERE case_id = $1
        ORDER BY created_at DESC`,
       [caseId]
     );
+    const assignedDoctors = await fetchAssignedDoctors(caseId);
 
     res.json({
       status: 'success',
@@ -457,6 +558,7 @@ export const getCaseById = async (req: AuthRequest, res: Response, next: NextFun
         ...caseResult.rows[0],
         intake: intakeResult.rows[0] || null,
         files: filesResult.rows,
+        assigned_doctors: assignedDoctors,
       },
     });
   } catch (error) {
@@ -521,6 +623,11 @@ export const assignDoctorToCase = async (req: AuthRequest, res: Response, next: 
 
     await ensurePatientOwnsCase(caseId, userId);
 
+    const doctorExists = await query('SELECT id FROM doctors WHERE id = $1', [doctorId]);
+    if (doctorExists.rows.length === 0) {
+      throw new AppError('Doctor not found', 404);
+    }
+
     await query(
       `INSERT INTO case_assignments (case_id, doctor_id, status)
        VALUES ($1, $2, 'assigned')
@@ -531,6 +638,10 @@ export const assignDoctorToCase = async (req: AuthRequest, res: Response, next: 
 
     res.json({
       status: 'success',
+      data: {
+        caseId,
+        doctorId,
+      },
       message: 'Doctor assigned to case successfully',
     });
   } catch (error) {
