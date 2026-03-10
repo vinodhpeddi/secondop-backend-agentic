@@ -135,6 +135,18 @@ const parseSpecialistQuestions = (input: unknown): string[] => {
   });
 };
 
+const parseOptionalSpecialistQuestions = (input: unknown): string[] => {
+  if (typeof input === 'undefined' || input === null) {
+    return [];
+  }
+
+  if (Array.isArray(input) && input.length === 0) {
+    return [];
+  }
+
+  return parseSpecialistQuestions(input);
+};
+
 const fetchAssignedDoctors = async (caseId: string) => {
   const assignments = await query(
     `SELECT ca.id,
@@ -408,12 +420,20 @@ export const submitCase = async (req: AuthRequest, res: Response, next: NextFunc
 
     await ensurePatientOwnsCase(caseId, userId);
 
-    const specialistQuestions = parseSpecialistQuestions(req.body.specialistQuestions);
-
     const caseResult = await query(
-      `SELECT analysis_status
-       FROM cases
-       WHERE id = $1`,
+      `SELECT c.analysis_status,
+              COUNT(*) FILTER (
+                WHERE mf.file_type = 'application/pdf' OR LOWER(mf.file_name) LIKE '%.pdf'
+              )::int AS pdf_count,
+              COUNT(*) FILTER (
+                WHERE mf.is_dicom = true
+                   OR LOWER(mf.file_name) LIKE '%.dcm'
+                   OR LOWER(mf.file_name) LIKE '%.dicom'
+              )::int AS dicom_count
+       FROM cases c
+       LEFT JOIN medical_files mf ON mf.case_id = c.id
+       WHERE c.id = $1
+       GROUP BY c.id, c.analysis_status`,
       [caseId]
     );
 
@@ -421,7 +441,22 @@ export const submitCase = async (req: AuthRequest, res: Response, next: NextFunc
       throw new AppError('Case not found', 404);
     }
 
-    if (caseResult.rows[0].analysis_status !== 'succeeded') {
+    const row = caseResult.rows[0] as {
+      analysis_status: string;
+      pdf_count: number;
+      dicom_count: number;
+    };
+
+    if (row.pdf_count < 1 && row.dicom_count < 1) {
+      throw new AppError('Upload at least one report before submission', 400);
+    }
+
+    const requiresPdfAnalysis = row.pdf_count > 0;
+    const specialistQuestions = requiresPdfAnalysis
+      ? parseSpecialistQuestions(req.body.specialistQuestions)
+      : parseOptionalSpecialistQuestions(req.body.specialistQuestions);
+
+    if (requiresPdfAnalysis && row.analysis_status !== 'succeeded') {
       throw new AppError('Case analysis must succeed before submission', 400);
     }
 
