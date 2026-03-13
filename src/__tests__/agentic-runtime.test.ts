@@ -4,6 +4,7 @@ jest.mock('../agentic/observability/eventEmitter', () => ({
   emitAgenticStepEvent: jest.fn().mockResolvedValue(undefined),
 }));
 import { AgenticError, AgenticLoopState } from '../agentic/core/types';
+import { buildCaseAnalysisArtifact } from '../services/analysisArtifact.service';
 
 describe('Agentic runtime policies', () => {
   const baseState: AgenticLoopState = {
@@ -22,6 +23,21 @@ describe('Agentic runtime policies', () => {
         'Could this represent unstable angina despite normal ECG?',
         'Which follow-up timeline is most appropriate?',
       ],
+      artifact: buildCaseAnalysisArtifact({
+        structuredSummary: {
+          chief_concern: 'possible ACS with uncertain etiology',
+          key_report_findings: 'Normal ECG does not exclude ischemia',
+          red_flags_to_discuss: 'Persistent chest pain',
+          follow_up_discussion_points: 'Serial biomarkers',
+          limitations_caveats: 'Requires clinician review',
+        },
+        specialistQuestions: [
+          'What immediate diagnostics are recommended?',
+          'Could this represent unstable angina despite normal ECG?',
+          'Which follow-up timeline is most appropriate?',
+        ],
+        model: 'gpt-4.1-mini',
+      }),
       model: 'gpt-4.1-mini',
     },
     observations: ['Chief Concern: possible ACS with uncertain etiology'],
@@ -90,6 +106,7 @@ describe('Agentic runtime policies', () => {
         summary: baseState.analysis!.summary,
         questions: baseState.analysis!.topQuestions,
         observations: baseState.observations,
+        artifact: baseState.analysis!.artifact,
         model: 'gpt-4.1-mini',
       }),
     } as any;

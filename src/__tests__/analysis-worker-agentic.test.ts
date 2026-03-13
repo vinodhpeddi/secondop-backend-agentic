@@ -9,6 +9,26 @@ import {
   markAnalysisRunProcessing,
   markAnalysisRunSucceeded,
 } from '../services/analysisRun.service';
+import { buildCaseAnalysisArtifact } from '../services/analysisArtifact.service';
+
+jest.mock('pg-boss', () => {
+  let workerHandler: ((jobs: Array<{ data: unknown }>) => Promise<void>) | null = null;
+
+  return jest.fn().mockImplementation(() => ({
+    on: jest.fn(),
+    start: jest.fn().mockResolvedValue(undefined),
+    createQueue: jest.fn().mockResolvedValue(undefined),
+    work: jest.fn().mockImplementation(async (_queueName: string, handler: typeof workerHandler) => {
+      workerHandler = handler;
+    }),
+    send: jest.fn().mockImplementation(async (_queueName: string, job: unknown) => {
+      if (workerHandler) {
+        await workerHandler([{ data: job }]).catch(() => undefined);
+      }
+    }),
+    stop: jest.fn().mockResolvedValue(undefined),
+  }));
+});
 
 jest.mock('../database/connection', () => ({
   query: jest.fn(),
@@ -53,13 +73,11 @@ describe('Analysis worker agentic modes', () => {
     jest.clearAllMocks();
     mockedQuery.mockResolvedValue({ rows: [] } as any);
     mockedGetLatestActiveAnalysisRun.mockResolvedValue(null as any);
-    mockedMarkAnalysisRunProcessing.mockResolvedValue(undefined as any);
+    mockedMarkAnalysisRunProcessing.mockResolvedValue(true as any);
     mockedMarkAnalysisRunSucceeded.mockResolvedValue(undefined as any);
     mockedMarkAnalysisRunFailed.mockResolvedValue(undefined as any);
     mockedRunCaseAnalysis.mockResolvedValue({ caseId: 'case-1' } as any);
-    mockedCreateAnalysisRun
-      .mockResolvedValueOnce({ id: 'run-baseline', status: 'queued' } as any)
-      .mockResolvedValueOnce({ id: 'run-agentic', status: 'queued' } as any);
+    mockedCreateAnalysisRun.mockResolvedValue({ id: 'run-analysis', status: 'queued' } as any);
   });
 
   afterEach(() => {
@@ -74,6 +92,17 @@ describe('Analysis worker agentic modes', () => {
         summary: 'Agentic summary with caveat language',
         questions: ['Q1 direct', 'Q2 direct', 'Q3 direct'],
         observations: ['Obs1'],
+        artifact: buildCaseAnalysisArtifact({
+          structuredSummary: {
+            chief_concern: 'Agentic summary with caveat language',
+            key_report_findings: 'Key findings',
+            red_flags_to_discuss: 'Red flags',
+            follow_up_discussion_points: 'Follow-up',
+            limitations_caveats: 'Needs clinician review',
+          },
+          specialistQuestions: ['Q1 direct', 'Q2 direct', 'Q3 direct'],
+          model: 'gpt-4.1-mini',
+        }),
         model: 'gpt-4.1-mini',
       },
     } as any);
@@ -81,8 +110,10 @@ describe('Analysis worker agentic modes', () => {
     await analysisWorker.queueCase('case-1');
     await flushAsync();
 
+    expect(mockedCreateAnalysisRun).toHaveBeenCalledWith('case-1', 'queued', 'agentic', 'direct');
+    expect(mockedRunCaseAnalysis).not.toHaveBeenCalled();
     expect(mockedRunAgenticCaseAnalysis).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: 'direct', caseId: 'case-1' })
+      expect.objectContaining({ mode: 'direct', caseId: 'case-1', runId: 'run-analysis' })
     );
 
     const directPersistCall = mockedQuery.mock.calls.find((call) =>
@@ -92,11 +123,14 @@ describe('Analysis worker agentic modes', () => {
     );
 
     expect(directPersistCall).toBeDefined();
-    expect(mockedMarkAnalysisRunSucceeded).toHaveBeenCalledWith('run-agentic', 'gpt-4.1-mini');
+    expect(mockedMarkAnalysisRunSucceeded).toHaveBeenCalledWith('run-analysis', 'gpt-4.1-mini');
   });
 
   it('keeps baseline path unaffected when shadow mode agentic execution fails', async () => {
     process.env.ANALYSIS_AGENTIC_MODE = 'shadow';
+    mockedCreateAnalysisRun
+      .mockResolvedValueOnce({ id: 'run-baseline', status: 'queued' } as any)
+      .mockResolvedValueOnce({ id: 'run-agentic', status: 'queued' } as any);
 
     mockedRunAgenticCaseAnalysis.mockRejectedValueOnce(new Error('Shadow execution failed'));
 

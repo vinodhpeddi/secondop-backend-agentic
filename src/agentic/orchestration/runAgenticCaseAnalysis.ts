@@ -127,6 +127,23 @@ export const runAgenticCaseAnalysis = async (options: RunAgenticCaseAnalysisOpti
         summary: '',
         questions: [],
         observations: [],
+        artifact: {
+          structured_summary: {
+            chief_concern: '',
+            key_report_findings: '',
+            red_flags_to_discuss: '',
+            follow_up_discussion_points: '',
+            limitations_caveats: '',
+          },
+          questionnaire: {
+            specialist_questions: [],
+          },
+          confidence_score: 0,
+          disclaimer: '',
+          evidence_refs: [],
+          model: context.model,
+          token_usage: null,
+        },
         model: context.model,
       },
       finalStatus: 'failed',

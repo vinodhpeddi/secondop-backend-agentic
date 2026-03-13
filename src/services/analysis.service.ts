@@ -1,4 +1,11 @@
 import OpenAI from 'openai';
+import {
+  buildCaseAnalysisArtifact,
+  CaseAnalysisArtifact,
+  extractObservationsFromArtifact,
+  TokenUsageMetrics,
+  defaultMedicalDisclaimer,
+} from './analysisArtifact.service';
 import { ExtractedReport } from './reportExtraction.service';
 
 export interface CaseIntakeData {
@@ -15,23 +22,10 @@ export interface CaseIntakeData {
 export interface CaseAnalysisResult {
   summary: string;
   topQuestions: string[];
+  artifact: CaseAnalysisArtifact;
   model: string;
   usage?: TokenUsageMetrics;
 }
-
-export interface TokenUsageMetrics {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-}
-
-const summarySectionHeaders = [
-  'Chief Concern',
-  'Key Report Findings',
-  'Red Flags To Discuss',
-  'Follow-up Discussion Points',
-  'Limitations/Caveats',
-] as const;
 
 const modelName = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 const timeoutMs = parseInt(process.env.OPENAI_TIMEOUT_MS || '60000', 10);
@@ -73,11 +67,12 @@ const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
 const buildSystemPrompt = (): string => {
   return [
     'You are a medical-report summarization assistant for second-opinion workflows.',
-    'Return strict JSON with keys: summary (string), topQuestions (string[3]).',
-    'Summary must include these section headers exactly:',
-    ...summarySectionHeaders,
-    'Top questions must be actionable specialist-facing questions.',
-    'Avoid absolute diagnosis claims and include uncertainty/caveat language when needed.',
+    'Return strict JSON using only the schema provided.',
+    'Do not provide a diagnosis, treatment decision, or fabricated medical facts.',
+    'Use cautious language when source material is incomplete or uncertain.',
+    'The disclaimer must clearly state that a licensed clinician must review the source records.',
+    'Confidence score must be between 0 and 1.',
+    'Questionnaire items must be actionable specialist-facing questions.',
     'Do not output markdown code fences.',
   ].join('\n');
 };
@@ -101,14 +96,20 @@ const buildUserPrompt = (intake: CaseIntakeData, reports: ExtractedReport[], gui
     'Medical Reports:',
     reportText,
     '',
+    `Allowed report file names: ${reports.map((report) => report.fileName).join(', ')}`,
     guidance ? `Agentic Guidance: ${guidance}` : '',
-    'Generate a sectioned summary and topQuestions exactly length 3.',
+    'Generate a structured_summary, questionnaire with exactly 3 specialist_questions, confidence_score, and disclaimer.',
   ]
     .filter((line) => line !== '')
     .join('\n');
 };
 
-const parseAndValidateOutput = (raw: string): Pick<CaseAnalysisResult, 'summary' | 'topQuestions'> => {
+const parseAndValidateOutput = (
+  raw: string,
+  reports: ExtractedReport[],
+  model: string,
+  usage?: TokenUsageMetrics
+): Pick<CaseAnalysisResult, 'summary' | 'topQuestions' | 'artifact'> => {
   let parsed: unknown;
 
   try {
@@ -121,27 +122,90 @@ const parseAndValidateOutput = (raw: string): Pick<CaseAnalysisResult, 'summary'
     throw new Error('Analysis response is not an object.');
   }
 
-  const summary = (parsed as { summary?: unknown }).summary;
-  const topQuestions = (parsed as { topQuestions?: unknown }).topQuestions;
+  const structuredSummary = (parsed as { structured_summary?: unknown }).structured_summary;
+  const questionnaire = (parsed as { questionnaire?: unknown }).questionnaire;
+  const confidenceScore = (parsed as { confidence_score?: unknown }).confidence_score;
+  const disclaimer = (parsed as { disclaimer?: unknown }).disclaimer;
 
-  if (typeof summary !== 'string' || !summary.trim()) {
-    throw new Error('Analysis summary is missing.');
+  if (!structuredSummary || typeof structuredSummary !== 'object') {
+    throw new Error('Analysis structured_summary is missing.');
   }
 
-  if (!Array.isArray(topQuestions) || topQuestions.length !== 3) {
+  const normalizedStructuredSummary = {
+    chief_concern:
+      typeof (structuredSummary as { chief_concern?: unknown }).chief_concern === 'string'
+        ? (structuredSummary as { chief_concern: string }).chief_concern.trim()
+        : '',
+    key_report_findings:
+      typeof (structuredSummary as { key_report_findings?: unknown }).key_report_findings === 'string'
+        ? (structuredSummary as { key_report_findings: string }).key_report_findings.trim()
+        : '',
+    red_flags_to_discuss:
+      typeof (structuredSummary as { red_flags_to_discuss?: unknown }).red_flags_to_discuss === 'string'
+        ? (structuredSummary as { red_flags_to_discuss: string }).red_flags_to_discuss.trim()
+        : '',
+    follow_up_discussion_points:
+      typeof (structuredSummary as { follow_up_discussion_points?: unknown }).follow_up_discussion_points === 'string'
+        ? (structuredSummary as { follow_up_discussion_points: string }).follow_up_discussion_points.trim()
+        : '',
+    limitations_caveats:
+      typeof (structuredSummary as { limitations_caveats?: unknown }).limitations_caveats === 'string'
+        ? (structuredSummary as { limitations_caveats: string }).limitations_caveats.trim()
+        : '',
+  };
+
+  const specialistQuestions = (
+    questionnaire &&
+    typeof questionnaire === 'object' &&
+    Array.isArray((questionnaire as { specialist_questions?: unknown }).specialist_questions)
+      ? (questionnaire as { specialist_questions: unknown[] }).specialist_questions
+      : []
+  ).map((item, index) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`questionnaire.specialist_questions[${index}] must be an object.`);
+    }
+
+    const question = (item as { question?: unknown }).question;
+    if (typeof question !== 'string' || !question.trim()) {
+      throw new Error('All analysis questions must be non-empty strings.');
+    }
+
+    return question.trim();
+  });
+
+  if (specialistQuestions.length !== 3) {
     throw new Error('Analysis must return exactly 3 questions.');
   }
 
-  const normalizedQuestions = topQuestions.map((item) => {
-    if (typeof item !== 'string' || !item.trim()) {
-      throw new Error('All analysis questions must be non-empty strings.');
-    }
-    return item.trim();
+  const artifact = buildCaseAnalysisArtifact({
+    structuredSummary: normalizedStructuredSummary,
+    specialistQuestions,
+    confidenceScore: typeof confidenceScore === 'number' ? confidenceScore : 0.5,
+    disclaimer: typeof disclaimer === 'string' ? disclaimer : defaultMedicalDisclaimer,
+    reports,
+    model,
+    tokenUsage: usage,
   });
 
   return {
-    summary: summary.trim(),
-    topQuestions: normalizedQuestions,
+    summary: [
+      'Chief Concern',
+      artifact.structured_summary.chief_concern,
+      '',
+      'Key Report Findings',
+      artifact.structured_summary.key_report_findings,
+      '',
+      'Red Flags To Discuss',
+      artifact.structured_summary.red_flags_to_discuss,
+      '',
+      'Follow-up Discussion Points',
+      artifact.structured_summary.follow_up_discussion_points,
+      '',
+      'Limitations/Caveats',
+      artifact.structured_summary.limitations_caveats,
+    ].join('\n'),
+    topQuestions: specialistQuestions,
+    artifact,
   };
 };
 
@@ -176,15 +240,48 @@ export const generateCaseAnalysis = async (
           type: 'object',
           additionalProperties: false,
           properties: {
-            summary: { type: 'string' },
-            topQuestions: {
-              type: 'array',
-              minItems: 3,
-              maxItems: 3,
-              items: { type: 'string' },
+            structured_summary: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                chief_concern: { type: 'string' },
+                key_report_findings: { type: 'string' },
+                red_flags_to_discuss: { type: 'string' },
+                follow_up_discussion_points: { type: 'string' },
+                limitations_caveats: { type: 'string' },
+              },
+              required: [
+                'chief_concern',
+                'key_report_findings',
+                'red_flags_to_discuss',
+                'follow_up_discussion_points',
+                'limitations_caveats',
+              ],
             },
+            questionnaire: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                specialist_questions: {
+                  type: 'array',
+                  minItems: 3,
+                  maxItems: 3,
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      question: { type: 'string' },
+                    },
+                    required: ['question'],
+                  },
+                },
+              },
+              required: ['specialist_questions'],
+            },
+            confidence_score: { type: 'number' },
+            disclaimer: { type: 'string' },
           },
-          required: ['summary', 'topQuestions'],
+          required: ['structured_summary', 'questionnaire', 'confidence_score', 'disclaimer'],
         },
       },
     },
@@ -197,90 +294,44 @@ export const generateCaseAnalysis = async (
     throw new Error('Analysis model returned an empty response.');
   }
 
-  const validated = parseAndValidateOutput(rawContent);
+  const usageMetrics = {
+    promptTokens: Number(completion?.usage?.prompt_tokens || 0),
+    completionTokens: Number(completion?.usage?.completion_tokens || 0),
+    totalTokens: Number(completion?.usage?.total_tokens || 0),
+  };
+
+  const validated = parseAndValidateOutput(rawContent, reports, selectedModel, usageMetrics);
 
   return {
     summary: validated.summary,
     topQuestions: validated.topQuestions,
+    artifact: validated.artifact,
     model: selectedModel,
-    usage: {
-      promptTokens: Number(completion?.usage?.prompt_tokens || 0),
-      completionTokens: Number(completion?.usage?.completion_tokens || 0),
-      totalTokens: Number(completion?.usage?.total_tokens || 0),
-    },
+    usage: usageMetrics,
   };
 };
 
-const cleanSectionValue = (value: string): string => {
-  return value
-    .replace(/\s+/g, ' ')
-    .replace(/^[\s\-*•]+/, '')
-    .trim();
-};
-
 export const extractObservationsFromSummary = (summary: string): string[] => {
-  if (!summary.trim()) {
-    return [];
-  }
-
   const lines = summary
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+    .filter(Boolean);
 
-  const sections = new Map<string, string[]>();
-  let currentHeader: string | null = null;
-
-  for (const rawLine of lines) {
-    const normalizedLine = rawLine.replace(/:\s*$/, '').trim();
-    const matchedHeader = summarySectionHeaders.find((header) => header.toLowerCase() === normalizedLine.toLowerCase());
-
-    if (matchedHeader) {
-      currentHeader = matchedHeader;
-      if (!sections.has(matchedHeader)) {
-        sections.set(matchedHeader, []);
-      }
-      continue;
-    }
-
-    const inlineHeader = summarySectionHeaders.find((header) =>
-      rawLine.toLowerCase().startsWith(`${header.toLowerCase()}:`)
-    );
-    if (inlineHeader) {
-      currentHeader = inlineHeader;
-      if (!sections.has(inlineHeader)) {
-        sections.set(inlineHeader, []);
-      }
-
-      const inlineContent = rawLine.slice(inlineHeader.length + 1).trim();
-      if (inlineContent) {
-        const existing = sections.get(inlineHeader) || [];
-        existing.push(inlineContent);
-        sections.set(inlineHeader, existing);
-      }
-      continue;
-    }
-
-    if (!currentHeader) {
-      continue;
-    }
-
-    const existing = sections.get(currentHeader) || [];
-    existing.push(rawLine);
-    sections.set(currentHeader, existing);
+  if (lines.length === 0) {
+    return [];
   }
 
-  return summarySectionHeaders
-    .map((header) => {
-      const content = (sections.get(header) || [])
-        .join(' ')
-        .trim();
+  const artifact = buildCaseAnalysisArtifact({
+    structuredSummary: {
+      chief_concern: lines[1] || '',
+      key_report_findings: lines[3] || '',
+      red_flags_to_discuss: lines[5] || '',
+      follow_up_discussion_points: lines[7] || '',
+      limitations_caveats: lines[9] || '',
+    },
+    specialistQuestions: [],
+    model: 'legacy-summary',
+  });
 
-      if (!content) {
-        return null;
-      }
-
-      return cleanSectionValue(`${header}: ${content}`);
-    })
-    .filter((item): item is string => Boolean(item));
+  return extractObservationsFromArtifact(artifact);
 };

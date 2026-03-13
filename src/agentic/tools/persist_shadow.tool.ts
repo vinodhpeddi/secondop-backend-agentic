@@ -18,6 +18,7 @@ export const persistShadowTool = async (input: PersistShadowInput): Promise<void
       summary: input.artifact.summary,
       questions: input.artifact.questions,
       observations: input.artifact.observations,
+      artifact: input.artifact.artifact,
       criticScore: input.state.criticScore,
       finalStatus: input.finalStatus,
       error: input.error,

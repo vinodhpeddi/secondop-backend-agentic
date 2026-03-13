@@ -1,5 +1,6 @@
 import { query } from '../database/connection';
 import { AgenticCriticScore } from '../agentic/core/types';
+import { CaseAnalysisArtifact } from './analysisArtifact.service';
 
 export type AnalysisRunStatus = 'queued' | 'processing' | 'succeeded' | 'failed';
 export type AnalysisRunEngine = 'baseline' | 'agentic';
@@ -26,6 +27,7 @@ export interface ShadowResult {
   summary: string;
   questions_json: string[];
   observations_json: string[];
+  artifact_json: CaseAnalysisArtifact | null;
   critic_score_json: AgenticCriticScore | null;
   final_status: 'succeeded' | 'failed';
   error: string | null;
@@ -52,6 +54,7 @@ interface CreateShadowResultInput {
   summary: string;
   questions: string[];
   observations: string[];
+  artifact: CaseAnalysisArtifact;
   criticScore: AgenticCriticScore | null;
   finalStatus: 'succeeded' | 'failed';
   error?: string;
@@ -81,6 +84,7 @@ const mapShadowRow = (row: Record<string, unknown>): ShadowResult => {
     summary: typeof row.summary === 'string' ? row.summary : '',
     questions_json: Array.isArray(row.questions_json) ? (row.questions_json as string[]) : [],
     observations_json: Array.isArray(row.observations_json) ? (row.observations_json as string[]) : [],
+    artifact_json: (row.artifact_json as CaseAnalysisArtifact | null) || null,
     critic_score_json: (row.critic_score_json as AgenticCriticScore | null) || null,
     final_status: row.final_status as 'succeeded' | 'failed',
     error: typeof row.error === 'string' ? row.error : null,
@@ -259,12 +263,13 @@ export const createShadowResult = async (input: CreateShadowResultInput): Promis
       summary,
       questions_json,
       observations_json,
+      artifact_json,
       critic_score_json,
       final_status,
       error
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    RETURNING id, case_id, run_id, mode, summary, questions_json, observations_json, critic_score_json, final_status, error, created_at`,
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    RETURNING id, case_id, run_id, mode, summary, questions_json, observations_json, artifact_json, critic_score_json, final_status, error, created_at`,
     [
       input.caseId,
       input.runId,
@@ -272,6 +277,7 @@ export const createShadowResult = async (input: CreateShadowResultInput): Promis
       input.summary,
       JSON.stringify(input.questions),
       JSON.stringify(input.observations),
+      JSON.stringify(input.artifact),
       input.criticScore ? JSON.stringify(input.criticScore) : null,
       input.finalStatus,
       input.error || null,
@@ -283,7 +289,7 @@ export const createShadowResult = async (input: CreateShadowResultInput): Promis
 
 export const getLatestShadowResultByRunId = async (runId: string): Promise<ShadowResult | null> => {
   const result = await query(
-    `SELECT id, case_id, run_id, mode, summary, questions_json, observations_json, critic_score_json, final_status, error, created_at
+    `SELECT id, case_id, run_id, mode, summary, questions_json, observations_json, artifact_json, critic_score_json, final_status, error, created_at
      FROM case_analysis_shadow_results
      WHERE run_id = $1
      ORDER BY created_at DESC
@@ -300,7 +306,7 @@ export const getLatestShadowResultByRunId = async (runId: string): Promise<Shado
 
 export const getLatestShadowResultByCaseId = async (caseId: string): Promise<ShadowResult | null> => {
   const result = await query(
-    `SELECT id, case_id, run_id, mode, summary, questions_json, observations_json, critic_score_json, final_status, error, created_at
+    `SELECT id, case_id, run_id, mode, summary, questions_json, observations_json, artifact_json, critic_score_json, final_status, error, created_at
      FROM case_analysis_shadow_results
      WHERE case_id = $1
      ORDER BY created_at DESC

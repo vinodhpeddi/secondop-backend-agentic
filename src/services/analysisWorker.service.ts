@@ -2,6 +2,8 @@ import PgBoss from 'pg-boss';
 import { query } from '../database/connection';
 import logger from '../utils/logger';
 import { AgentError } from '../agents/core/agent.types';
+import { AgenticError } from '../agentic/core/types';
+import type { AgenticMode } from '../agentic/core/types';
 import { runCaseAnalysis } from '../agents/case-analysis/runCaseAnalysis';
 import { resolveAgenticMode } from '../agentic/core/policy';
 import { runAgenticCaseAnalysis } from '../agentic/orchestration/runAgenticCaseAnalysis';
@@ -14,6 +16,7 @@ import {
   markAnalysisRunQueued,
   markAnalysisRunSucceeded,
 } from './analysisRun.service';
+import type { AnalysisRunEngine } from './analysisRun.service';
 
 const maxCharsPerFile = parseInt(process.env.ANALYSIS_MAX_CHARS_PER_FILE || '12000', 10);
 const maxTotalChars = parseInt(process.env.ANALYSIS_MAX_TOTAL_CHARS || '30000', 10);
@@ -28,6 +31,8 @@ interface QueueCaseResult {
   analysisRunId: string;
   analysisStatus: 'queued' | 'processing';
 }
+
+const getPrimaryRunEngine = (mode: AgenticMode): AnalysisRunEngine => (mode === 'direct' ? 'agentic' : 'baseline');
 
 class AnalysisWorker {
   private boss: PgBoss | null = null;
@@ -97,6 +102,8 @@ class AnalysisWorker {
 
   public async recoverInterruptedJobs(): Promise<void> {
     await this.ensureStarted();
+    const mode = resolveAgenticMode();
+    const primaryEngine = getPrimaryRunEngine(mode);
 
     const result = await query(
       `SELECT id, analysis_status
@@ -107,7 +114,7 @@ class AnalysisWorker {
     const rows = result.rows as Array<{ id: string; analysis_status: string }>;
 
     for (const row of rows) {
-      let run = await getLatestActiveAnalysisRun(row.id, 'baseline');
+      let run = await getLatestActiveAnalysisRun(row.id, primaryEngine);
 
       if (row.analysis_status === 'processing') {
         await query(
@@ -129,7 +136,7 @@ class AnalysisWorker {
       }
 
       if (!run) {
-        run = await createAnalysisRun(row.id, 'queued', 'baseline', resolveAgenticMode());
+        run = await createAnalysisRun(row.id, 'queued', primaryEngine, mode);
       }
 
       await this.enqueue({
@@ -141,9 +148,10 @@ class AnalysisWorker {
     const queuedRuns = await query(
       `SELECT id, case_id
        FROM case_analysis_runs
-       WHERE engine = 'baseline' AND status = 'queued'
+       WHERE engine = $1 AND status = 'queued'
        ORDER BY created_at ASC
-       LIMIT 500`
+       LIMIT 500`,
+      [primaryEngine]
     );
 
     for (const run of queuedRuns.rows as Array<{ id: string; case_id: string }>) {
@@ -154,7 +162,9 @@ class AnalysisWorker {
     }
 
     if (rows.length > 0 || queuedRuns.rows.length > 0) {
-      logger.info(`Recovered ${rows.length} case(s) and re-enqueued ${queuedRuns.rows.length} queued baseline run(s)`);
+      logger.info(
+        `Recovered ${rows.length} case(s) and re-enqueued ${queuedRuns.rows.length} queued ${primaryEngine} run(s)`
+      );
     }
   }
 
@@ -162,7 +172,8 @@ class AnalysisWorker {
     await this.ensureStarted();
 
     const mode = resolveAgenticMode();
-    const activeRun = await getLatestActiveAnalysisRun(caseId, 'baseline');
+    const primaryEngine = getPrimaryRunEngine(mode);
+    const activeRun = await getLatestActiveAnalysisRun(caseId, primaryEngine);
     if (activeRun) {
       if (activeRun.status === 'queued') {
         await this.enqueue({
@@ -183,6 +194,7 @@ class AnalysisWorker {
            analysis_error = NULL,
            analysis_summary = NULL,
            analysis_questions = NULL,
+           analysis_artifact = NULL,
            analysis_model = NULL,
            analysis_started_at = NULL,
            analysis_completed_at = NULL,
@@ -191,7 +203,7 @@ class AnalysisWorker {
       [caseId]
     );
 
-    const run = await createAnalysisRun(caseId, 'queued', 'baseline', mode);
+    const run = await createAnalysisRun(caseId, 'queued', primaryEngine, mode);
 
     await this.enqueue({
       caseId,
@@ -204,9 +216,109 @@ class AnalysisWorker {
     };
   }
 
+  private async processAgenticPrimaryCase(job: AnalysisQueueJob, mode: AgenticMode): Promise<void> {
+    const { caseId, runId } = job;
+    const agenticRunSpan = startPhoenixSpan('analysis.agentic.run', {
+      caseId,
+      runId,
+      mode,
+    });
+
+    try {
+      const claimedRun = await markAnalysisRunProcessing(runId);
+      if (!claimedRun) {
+        logger.info(`Skipping analysis run ${runId} for case ${caseId}; already claimed by another worker.`);
+        agenticRunSpan.end('OK');
+        return;
+      }
+
+      await query(
+        `UPDATE cases
+         SET analysis_status = 'processing',
+             analysis_error = NULL,
+             analysis_started_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [caseId]
+      );
+
+      const agenticResult = await runAgenticCaseAnalysis({
+        caseId,
+        runId,
+        mode,
+        maxCharsPerFile,
+        maxTotalChars,
+      });
+
+      await markAnalysisRunSucceeded(runId, agenticResult.artifact.model);
+
+      await query(
+        `UPDATE cases
+         SET analysis_status = 'succeeded',
+             analysis_summary = $2,
+             analysis_questions = $3,
+             analysis_artifact = $4,
+             analysis_model = $5,
+             analysis_error = NULL,
+             analysis_completed_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [
+          caseId,
+          agenticResult.artifact.summary,
+          JSON.stringify(agenticResult.artifact.questions),
+          JSON.stringify(agenticResult.artifact.artifact),
+          agenticResult.artifact.model,
+        ]
+      );
+
+      agenticRunSpan.end('OK');
+      logger.info(`Agentic analysis completed for case ${caseId} (run ${runId}, mode ${mode})`);
+    } catch (error) {
+      const errorMessage =
+        error instanceof AgenticError
+          ? `[${error.code}] ${error.message}`
+          : error instanceof Error
+            ? error.message
+            : 'Unknown agentic analysis error';
+
+      await query(
+        `UPDATE cases
+         SET analysis_status = 'failed',
+             analysis_summary = NULL,
+             analysis_questions = NULL,
+             analysis_artifact = NULL,
+             analysis_model = NULL,
+             analysis_error = $2,
+             analysis_completed_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [caseId, errorMessage]
+      );
+
+      try {
+        await markAnalysisRunFailed(runId, errorMessage);
+      } catch (runError) {
+        const runErrorMessage = runError instanceof Error ? runError.message : String(runError);
+        logger.error(`Failed updating analysis run ${runId} status: ${runErrorMessage}`);
+      }
+
+      agenticRunSpan.end('ERROR', errorMessage);
+      logger.error(`Agentic direct mode failed for case ${caseId}: ${errorMessage}`);
+      throw error;
+    }
+  }
+
   private async processCase(job: AnalysisQueueJob): Promise<void> {
     const { caseId, runId } = job;
     const mode = resolveAgenticMode();
+    const primaryEngine = getPrimaryRunEngine(mode);
+
+    if (primaryEngine === 'agentic') {
+      await this.processAgenticPrimaryCase(job, mode);
+      return;
+    }
+
     const baselineRunSpan = startPhoenixSpan('analysis.baseline.run', {
       caseId,
       runId,
@@ -275,7 +387,8 @@ class AnalysisWorker {
              SET analysis_status = 'succeeded',
                  analysis_summary = $2,
                  analysis_questions = $3,
-                 analysis_model = $4,
+                 analysis_artifact = $4,
+                 analysis_model = $5,
                  analysis_error = NULL,
                  analysis_completed_at = CURRENT_TIMESTAMP,
                  updated_at = CURRENT_TIMESTAMP
@@ -284,6 +397,7 @@ class AnalysisWorker {
               caseId,
               agenticResult.artifact.summary,
               JSON.stringify(agenticResult.artifact.questions),
+              JSON.stringify(agenticResult.artifact.artifact),
               agenticResult.artifact.model,
             ]
           );
@@ -305,6 +419,7 @@ class AnalysisWorker {
              SET analysis_status = 'failed',
                  analysis_summary = NULL,
                  analysis_questions = NULL,
+                 analysis_artifact = NULL,
                  analysis_model = NULL,
                  analysis_error = $2,
                  analysis_completed_at = CURRENT_TIMESTAMP,

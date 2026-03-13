@@ -4,6 +4,7 @@ import { query } from '../database/connection';
 import { generateCaseAnalysis } from '../services/analysis.service';
 import { extractCaseReports } from '../services/reportExtraction.service';
 import { insertAnalysisEvent, markAnalysisRunSucceeded } from '../services/analysisRun.service';
+import { buildCaseAnalysisArtifact } from '../services/analysisArtifact.service';
 
 jest.mock('../database/connection', () => ({
   query: jest.fn(),
@@ -70,6 +71,17 @@ describe('Case analysis agent orchestrator', () => {
     mockedGenerateCaseAnalysis.mockResolvedValueOnce({
       summary: 'Chief Concern\nChest pressure\nRed Flags To Discuss\nWorsening dyspnea',
       topQuestions: ['What immediate tests are most important?', 'Is imaging urgently indicated?', 'What treatment should be prioritized now?'],
+      artifact: buildCaseAnalysisArtifact({
+        structuredSummary: {
+          chief_concern: 'Chest pressure',
+          key_report_findings: 'Clinical report text',
+          red_flags_to_discuss: 'Worsening dyspnea',
+          follow_up_discussion_points: 'Urgent cardiology follow-up',
+          limitations_caveats: 'Needs clinician confirmation',
+        },
+        specialistQuestions: ['What immediate tests are most important?', 'Is imaging urgently indicated?', 'What treatment should be prioritized now?'],
+        model: 'gpt-4.1-mini',
+      }),
       model: 'gpt-4.1-mini',
     });
 
@@ -82,7 +94,7 @@ describe('Case analysis agent orchestrator', () => {
     });
 
     expect(result.analysis?.topQuestions).toHaveLength(3);
-    expect(result.observations).toEqual(['Chief Concern: Chest pressure', 'Red Flags To Discuss: Worsening dyspnea']);
+    expect(result.observations).toEqual(['Chief Concern: Chest pressure', 'Key Report Findings: Worsening dyspnea']);
 
     expect(mockedInsertAnalysisEvent).toHaveBeenCalledTimes(10);
     expect(mockedInsertAnalysisEvent.mock.calls[0][0]).toMatchObject({

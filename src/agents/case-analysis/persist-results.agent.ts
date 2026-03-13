@@ -17,7 +17,8 @@ export class PersistResultsAgent implements AgentStep<CaseAnalysisPipelineState,
          SET analysis_status = 'succeeded',
              analysis_summary = $2,
              analysis_questions = $3,
-             analysis_model = $4,
+             analysis_artifact = $4,
+             analysis_model = $5,
              analysis_error = NULL,
              analysis_completed_at = CURRENT_TIMESTAMP,
              updated_at = CURRENT_TIMESTAMP
@@ -26,6 +27,7 @@ export class PersistResultsAgent implements AgentStep<CaseAnalysisPipelineState,
           context.caseId,
           input.analysis.summary,
           JSON.stringify(input.analysis.topQuestions),
+          JSON.stringify(input.analysis.artifact),
           input.analysis.model,
         ]
       );

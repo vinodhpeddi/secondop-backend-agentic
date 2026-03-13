@@ -1,3 +1,4 @@
+import { CaseAnalysisArtifact } from '../../services/analysisArtifact.service';
 import { CaseAnalysisResult, CaseIntakeData } from '../../services/analysis.service';
 import { ExtractedReport } from '../../services/reportExtraction.service';
 
@@ -47,6 +48,7 @@ export interface AgenticFinalArtifact {
   summary: string;
   questions: string[];
   observations: string[];
+  artifact: CaseAnalysisArtifact;
   model: string;
 }
 

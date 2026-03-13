@@ -15,6 +15,7 @@ import {
 import { getCaseRunTrace } from '../agentic/observability/analysisObservability.service';
 import { AuthRequest } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
+import { buildCaseAnalysisArtifact } from '../services/analysisArtifact.service';
 
 jest.mock('../database/connection', () => ({
   query: jest.fn(),
@@ -79,6 +80,8 @@ describe('Case analysis controllers', () => {
       selectedRunId: null,
       events: [],
       shadow: null,
+      runTokenUsageByRunId: {},
+      selectedRunTokenUsage: null,
     });
   });
 
@@ -175,6 +178,8 @@ describe('Case analysis controllers', () => {
             analysis_status: 'succeeded',
             analysis_summary: 'Chief Concern\nExample concern\nRed Flags To Discuss\nSevere pain worsening',
             analysis_questions: ['Q1', 'Q2', 'Q3'],
+            analysis_artifact: null,
+            analysis_model: 'gpt-4.1-mini',
             analysis_error: null,
           },
         ],
@@ -190,17 +195,22 @@ describe('Case analysis controllers', () => {
     await getCaseAnalysis(req, res, next);
 
     expect(next).not.toHaveBeenCalled();
-    expect(res.json).toHaveBeenCalledWith({
-      status: 'success',
-      data: {
-        analysisStatus: 'succeeded',
-        summary: 'Chief Concern\nExample concern\nRed Flags To Discuss\nSevere pain worsening',
-        analysisQuestions: ['Q1', 'Q2', 'Q3'],
-        error: null,
-        analysisRunId: 'run-2',
-        observations: ['Chief Concern: Example concern', 'Red Flags To Discuss: Severe pain worsening'],
-      },
-    });
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'success',
+        data: expect.objectContaining({
+          analysisStatus: 'succeeded',
+          summary: 'Example concern',
+          analysisQuestions: ['Q1', 'Q2', 'Q3'],
+          artifact: expect.objectContaining({
+            confidence_score: 0.5,
+          }),
+          error: null,
+          analysisRunId: 'run-2',
+          observations: ['Chief Concern: Example concern', 'Red Flags To Discuss: Severe pain worsening'],
+        }),
+      })
+    );
   });
 
   it('returns agentic debug fields when includeAgentic=true', async () => {
@@ -212,6 +222,18 @@ describe('Case analysis controllers', () => {
             analysis_status: 'succeeded',
             analysis_summary: 'Chief Concern\nPossible myocarditis with uncertain etiology',
             analysis_questions: ['Q1', 'Q2', 'Q3'],
+            analysis_artifact: buildCaseAnalysisArtifact({
+              structuredSummary: {
+                chief_concern: 'Possible myocarditis with uncertain etiology',
+                key_report_findings: 'Elevated troponin',
+                red_flags_to_discuss: 'Worsening chest pain',
+                follow_up_discussion_points: 'Cardiac MRI consideration',
+                limitations_caveats: 'Requires clinician review',
+              },
+              specialistQuestions: ['Q1', 'Q2', 'Q3'],
+              model: 'gpt-4.1-mini',
+            }),
+            analysis_model: 'gpt-4.1-mini',
             analysis_error: null,
           },
         ],
@@ -333,6 +355,7 @@ describe('Case analysis controllers', () => {
         analysisStatus: 'failed',
         summary: null,
         analysisQuestions: null,
+        artifact: null,
         error: 'No extractable text found in uploaded PDF reports.',
         analysisRunId: 'run-3',
         observations: null,
@@ -343,7 +366,7 @@ describe('Case analysis controllers', () => {
   it('blocks submit when analysis has not succeeded', async () => {
     mockedQuery
       .mockResolvedValueOnce({ rows: [{ id: 'case-1' }] } as any)
-      .mockResolvedValueOnce({ rows: [{ analysis_status: 'processing' }] } as any);
+      .mockResolvedValueOnce({ rows: [{ analysis_status: 'processing', pdf_count: 1, dicom_count: 0 }] } as any);
 
     const req = createPatientRequest(
       {
@@ -364,7 +387,9 @@ describe('Case analysis controllers', () => {
   });
 
   it('blocks submit when specialist questions count is not exactly three', async () => {
-    mockedQuery.mockResolvedValueOnce({ rows: [{ id: 'case-1' }] } as any);
+    mockedQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'case-1' }] } as any)
+      .mockResolvedValueOnce({ rows: [{ analysis_status: 'succeeded', pdf_count: 1, dicom_count: 0 }] } as any);
 
     const req = createPatientRequest(
       {

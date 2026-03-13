@@ -18,6 +18,7 @@ export class FinalizerAgent {
       summary: state.analysis.summary,
       questions: state.analysis.topQuestions,
       observations: state.observations,
+      artifact: state.analysis.artifact,
       model: state.analysis.model,
     };
   }

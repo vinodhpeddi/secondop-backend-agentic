@@ -9,6 +9,25 @@ import {
   markAnalysisRunQueued,
 } from '../services/analysisRun.service';
 
+jest.mock('pg-boss', () => {
+  let workerHandler: ((jobs: Array<{ data: unknown }>) => Promise<void>) | null = null;
+
+  return jest.fn().mockImplementation(() => ({
+    on: jest.fn(),
+    start: jest.fn().mockResolvedValue(undefined),
+    createQueue: jest.fn().mockResolvedValue(undefined),
+    work: jest.fn().mockImplementation(async (_queueName: string, handler: typeof workerHandler) => {
+      workerHandler = handler;
+    }),
+    send: jest.fn().mockImplementation(async (_queueName: string, job: unknown) => {
+      if (workerHandler) {
+        await workerHandler([{ data: job }]).catch(() => undefined);
+      }
+    }),
+    stop: jest.fn().mockResolvedValue(undefined),
+  }));
+});
+
 jest.mock('../database/connection', () => ({
   query: jest.fn(),
 }));
@@ -47,6 +66,8 @@ describe('Analysis worker', () => {
       id: 'run-1',
       case_id: 'case-1',
       status: 'queued',
+      engine: 'baseline',
+      execution_mode: 'off',
       started_at: null,
       completed_at: null,
       model: null,
@@ -54,7 +75,7 @@ describe('Analysis worker', () => {
       created_at: new Date(),
     } as any);
     mockedMarkAnalysisRunQueued.mockResolvedValue(undefined as any);
-    mockedMarkAnalysisRunProcessing.mockResolvedValue(undefined as any);
+    mockedMarkAnalysisRunProcessing.mockResolvedValue(true as any);
     mockedMarkAnalysisRunFailed.mockResolvedValue(undefined as any);
     mockedRunCaseAnalysis.mockResolvedValue({ caseId: 'case-1' } as any);
   });
