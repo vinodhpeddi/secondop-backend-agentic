@@ -593,7 +593,7 @@ export const getCaseById = async (req: AuthRequest, res: Response, next: NextFun
               mf.created_at
        FROM medical_files mf
        LEFT JOIN dicom_instances di ON di.file_id = mf.id
-       WHERE case_id = $1
+       WHERE mf.case_id = $1
        ORDER BY mf.created_at DESC`,
       [caseId]
     );
