@@ -18,13 +18,25 @@ const requiredStatus = (res, expected, label) => {
   }
 };
 
-const resolveFetch = async () => {
-  if (typeof globalThis.fetch === 'function') {
-    return globalThis.fetch.bind(globalThis);
+const resolveWebApis = async () => {
+  if (
+    typeof globalThis.fetch === 'function' &&
+    typeof globalThis.Blob === 'function' &&
+    typeof globalThis.FormData === 'function'
+  ) {
+    return {
+      fetch: globalThis.fetch.bind(globalThis),
+      Blob: globalThis.Blob,
+      FormData: globalThis.FormData,
+    };
   }
 
   const module = await import('node-fetch');
-  return module.default;
+  return {
+    fetch: module.default,
+    Blob: module.Blob,
+    FormData: module.FormData,
+  };
 };
 
 const jsonRequest = async (path, { method = 'GET', token, body } = {}) => {
@@ -77,11 +89,11 @@ startxref
 300
 %%EOF`;
 
-  const form = new FormData();
+  const form = new globalThis.FormData();
   form.append('caseId', caseId);
   form.append('category', 'lab-report');
   form.append('description', 'Smoke test upload');
-  form.append('file', new Blob([minimalPdf], { type: 'application/pdf' }), 'smoke-report.pdf');
+  form.append('file', new globalThis.Blob([minimalPdf], { type: 'application/pdf' }), 'smoke-report.pdf');
 
   const res = await fetch(`${API_BASE_URL}/api/${API_VERSION}/files/upload`, {
     method: 'POST',
@@ -112,8 +124,10 @@ const pollAnalysis = async (caseId, token) => {
 };
 
 const run = async () => {
-  const fetchImpl = await resolveFetch();
-  globalThis.fetch = fetchImpl;
+  const webApis = await resolveWebApis();
+  globalThis.fetch = webApis.fetch;
+  globalThis.Blob = webApis.Blob;
+  globalThis.FormData = webApis.FormData;
 
   console.log(`[smoke] API base: ${API_BASE_URL}`);
 
